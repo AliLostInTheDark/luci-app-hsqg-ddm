@@ -202,10 +202,22 @@ EOF
 	[ -z "$MACKEY" ] && MACKEY="a69cd4e034f72be49ecbdd7755113e0a"
 
 	# 4. Interface Packet Counters from stats.asp
-	local LAN_RX_PKTS=$(echo "$STATS_HTML" | grep -i -A 10 'LAN' | sed -e 's/<[^>]*>/ /g' | awk '{print $2}' | head -n 1)
+	local LAN_LINE=$(echo "$STATS_HTML" | grep -A 8 -i '>LAN<' | sed -e 's/<[^>]*>/ /g' | tr '\n' ' ' | tr -s ' ')
+	local LAN_RX_PKTS=$(echo "$LAN_LINE" | awk '{print $2}')
+	local LAN_RX_ERR=$(echo "$LAN_LINE" | awk '{print $3}')
+	local LAN_RX_DROP=$(echo "$LAN_LINE" | awk '{print $4}')
+	local LAN_TX_PKTS=$(echo "$LAN_LINE" | awk '{print $5}')
+	local LAN_TX_ERR=$(echo "$LAN_LINE" | awk '{print $6}')
+	local LAN_TX_DROP=$(echo "$LAN_LINE" | awk '{print $7}')
 	[ -z "$LAN_RX_PKTS" ] && LAN_RX_PKTS="0"
-	local LAN_TX_PKTS=$(echo "$STATS_HTML" | grep -i -A 10 'LAN' | sed -e 's/<[^>]*>/ /g' | awk '{print $5}' | head -n 1)
+	[ -z "$LAN_RX_ERR" ] && LAN_RX_ERR="0"
+	[ -z "$LAN_RX_DROP" ] && LAN_RX_DROP="0"
 	[ -z "$LAN_TX_PKTS" ] && LAN_TX_PKTS="0"
+	[ -z "$LAN_TX_ERR" ] && LAN_TX_ERR="0"
+	[ -z "$LAN_TX_DROP" ] && LAN_TX_DROP="0"
+
+	local OMCC_VER=$(echo "$GPON_HTML" | grep -i '<input.*name="omcc_ver"' | sed -e 's/.*value="//' -e 's/".*//' | tr -d ' \r\n')
+	[ -z "$OMCC_VER" ] && OMCC_VER="160"
 
 	# Clean numeric outputs
 	TEMP=$(echo "$TEMP" | grep -oE '[-+]?[0-9]+(\.[0-9]+)?' | head -n 1)
@@ -288,6 +300,7 @@ EOF
 		"hardware": "$HW_VER",
 		"omci_sw1": "$OMCI_SW1",
 		"omci_sw2": "$OMCI_SW2",
+		"omcc_version": "$OMCC_VER",
 		"cpu_usage": "$CPU_USE",
 		"mem_usage": "$MEM_USE",
 		"mac": "$MAC_ADDR",
@@ -295,7 +308,11 @@ EOF
 		"lan_status": "$LAN_STAT",
 		"vlan_id": "$VLAN_ID",
 		"lan_rx_pkts": "$LAN_RX_PKTS",
-		"lan_tx_pkts": "$LAN_TX_PKTS"
+		"lan_rx_err": "$LAN_RX_ERR",
+		"lan_rx_drop": "$LAN_RX_DROP",
+		"lan_tx_pkts": "$LAN_TX_PKTS",
+		"lan_tx_err": "$LAN_TX_ERR",
+		"lan_tx_drop": "$LAN_TX_DROP"
 	},
 	"module": {
 		"vendor": "$VENDOR_ID",

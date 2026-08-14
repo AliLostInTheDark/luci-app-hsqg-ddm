@@ -313,8 +313,9 @@ return view.extend({
 					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('Optical Interface:')), E('span', { class: 'hw-kv-v' }, 'SC-APC (Single Mode)')]),
 					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('Standard Compliance:')), E('span', { class: 'hw-kv-v' }, 'ITU-T G.984 / SFF-8472')]),
 					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('Hardware Revision:')), E('span', { id: 'info-hw', class: 'hw-kv-v' }, 'V1.0')]),
-					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('OMCI Version 1:')), E('span', { id: 'info-omci1', class: 'hw-kv-v' }, 'V1.1.8-240408')]),
-					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('OMCI Version 2:')), E('span', { id: 'info-omci2', class: 'hw-kv-v' }, 'V1.1.6-240202')])
+					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('OMCI Image 1 (Active):')), E('span', { id: 'info-omci1', class: 'hw-kv-v' }, 'V1.1.8-240408')]),
+					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('OMCI Image 2 (Standby):')), E('span', { id: 'info-omci2', class: 'hw-kv-v' }, 'V1.1.6-240202')]),
+					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('OMCC Protocol:')), E('span', { id: 'info-omcc', class: 'hw-kv-v' }, '0xA0 (ITU-T G.988)')])
 				]),
 				E('div', { class: 'hw-thermals-divider' }),
 				// Column 3: Traffic & Network Performance
@@ -324,8 +325,9 @@ return view.extend({
 					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('WAN VLAN Configuration:')), E('span', { id: 'info-vlan', class: 'hw-kv-v' }, 'PVID 1015 (Priority 0)')]),
 					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('Module CPU Load:')), E('span', { id: 'info-cpu', class: 'hw-kv-v' }, '0%')]),
 					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('Module Memory Usage:')), E('span', { id: 'info-mem', class: 'hw-kv-v' }, '49%')]),
-					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('LAN Traffic (RX/TX):')), E('span', { id: 'info-pkts', class: 'hw-kv-v' }, '-- pkts')]),
-					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('MACKEY Verification:')), E('span', { id: 'info-mackey-stat', class: 'hw-kv-v', style: 'color: #00acc1; font-weight: 700;' }, 'success')])
+					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('LAN Traffic (RX / TX):')), E('span', { id: 'info-pkts', class: 'hw-kv-v' }, '-- pkts')]),
+					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('Interface Errors & Drops:')), E('span', { id: 'info-errs', class: 'hw-kv-v', style: 'color: #10b981; font-weight: 700;' }, '0 err / 0 drop')]),
+					E('div', { class: 'hw-kv' }, [E('span', { class: 'hw-kv-k' }, _('MACKEY Verification:')), E('span', { id: 'info-mackey-stat', class: 'hw-kv-v', style: 'color: #10b981; font-weight: 700;' }, 'success')])
 				])
 			])
 		]);
@@ -597,12 +599,24 @@ return view.extend({
 			setTxt('info-hw', dev.hardware);
 			setTxt('info-omci1', dev.omci_sw1);
 			setTxt('info-omci2', dev.omci_sw2);
+			setTxt('info-omcc', dev.omcc_version ? '0x' + parseInt(dev.omcc_version).toString(16).toUpperCase() + ' (' + dev.omcc_version + ')' : '0xA0 (160)');
 			setTxt('info-lan', dev.lan_status);
 			setTxt('info-vlan', dev.vlan_id ? 'PVID ' + dev.vlan_id + ' (Priority 0)' : 'PVID 1015');
 			setTxt('info-cpu', dev.cpu_usage);
 			setTxt('info-mem', dev.mem_usage);
-			if (dev.lan_rx_pkts && dev.lan_tx_pkts) {
-				setTxt('info-pkts', dev.lan_rx_pkts + ' / ' + dev.lan_tx_pkts);
+			if (dev.lan_rx_pkts !== undefined && dev.lan_tx_pkts !== undefined) {
+				setTxt('info-pkts', dev.lan_rx_pkts + ' / ' + dev.lan_tx_pkts + ' pkts');
+			}
+			var rxErr = parseInt(dev.lan_rx_err) || 0;
+			var txErr = parseInt(dev.lan_tx_err) || 0;
+			var rxDrop = parseInt(dev.lan_rx_drop) || 0;
+			var txDrop = parseInt(dev.lan_tx_drop) || 0;
+			var errEl = document.getElementById('info-errs');
+			if (errEl) {
+				var totalErrs = rxErr + txErr;
+				var totalDrops = rxDrop + txDrop;
+				errEl.textContent = totalErrs + ' err / ' + totalDrops + ' drop';
+				errEl.style.color = (totalErrs > 0 || totalDrops > 0) ? '#f59e0b' : '#10b981';
 			}
 			setTxt('info-mackey-stat', onu.mackey_status || 'success');
 
