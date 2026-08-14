@@ -125,6 +125,34 @@ return view.extend({
 			return dbm.toFixed(2) + ' dBm';
 		};
 
+		// hw-dashboard matching Uptime formatter (e.g. 2d 14h 50m)
+		var formatUptime = function(upRaw) {
+			if (!upRaw) return '--';
+			if (typeof upRaw === 'number' || /^\d+$/.test(String(upRaw).trim())) {
+				var sec = parseInt(upRaw);
+				var days = Math.floor(sec / 86400);
+				var hours = Math.floor((sec % 86400) / 3600);
+				var mins = Math.floor((sec % 3600) / 60);
+				var out = '';
+				if (days > 0) out += days + 'd ';
+				if (hours > 0 || days > 0) out += hours + 'h ';
+				out += mins + 'm';
+				return out || '0m';
+			}
+			var m = String(upRaw).match(/(?:(\d+)\s*days?,?\s*)?(\d+):(\d+)(?::(\d+))?/i);
+			if (m) {
+				var days = parseInt(m[1]) || 0;
+				var hours = parseInt(m[2]) || 0;
+				var mins = parseInt(m[3]) || 0;
+				var out = '';
+				if (days > 0) out += days + 'd ';
+				if (hours > 0 || days > 0) out += hours + 'h ';
+				out += mins + 'm';
+				return out || '0m';
+			}
+			return upRaw;
+		};
+
 		// Top Quick Bar (Unit Switcher + Target Badge)
 		var topBar = E('div', { class: 'hw-top-bar' }, [
 			E('div', { class: 'hw-top-left' }, [
@@ -557,7 +585,7 @@ return view.extend({
 			setTxt('info-sn', dev.gpon_sn);
 			setTxt('info-mac', dev.mac);
 			setTxt('info-mackey', dev.mackey || '--');
-			setTxt('info-uptime', dev.uptime);
+			setTxt('info-uptime', formatUptime(dev.uptime));
 			setTxt('info-hw', dev.hardware);
 			setTxt('info-omci1', dev.omci_sw1);
 			setTxt('info-omci2', dev.omci_sw2);
