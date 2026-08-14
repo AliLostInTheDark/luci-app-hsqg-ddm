@@ -1,0 +1,22 @@
+{
+	"luci-app-hsqg-ddm": {
+		"description": "Allow LuCI to read HSGQ SFP DDM diagnostics and test connection",
+		"read": {
+			"ubus": {
+				"hsqg_ddm": [
+					"get_status",
+					"get_info",
+					"test_connection"
+				]
+			},
+			"uci": [
+				"hsqg_ddm"
+			]
+		},
+		"write": {
+			"uci": [
+				"hsqg_ddm"
+			]
+		}
+	}
+}

@@ -1,0 +1,28 @@
+{
+	"admin/status/hsqg_ddm": {
+		"title": "HSGQ SFP DDM",
+		"order": 55,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-hsqg-ddm" ]
+		}
+	},
+	"admin/status/hsqg_ddm/dashboard": {
+		"title": "Optical Diagnostics",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "hsqg_ddm/dashboard"
+		}
+	},
+	"admin/status/hsqg_ddm/settings": {
+		"title": "Settings",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "hsqg_ddm/settings"
+		}
+	}
+}
