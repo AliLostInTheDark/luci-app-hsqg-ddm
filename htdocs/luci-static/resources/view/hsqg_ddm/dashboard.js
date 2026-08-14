@@ -278,7 +278,11 @@ return view.extend({
 
 			return {
 				node: card,
-				circ: circumferen		// 1. Top Row: 3 Primary Dials (RX, TX, Operating Temperature)
+				circ: circumference
+			};
+		};
+
+		// 1. Top Row: 3 Primary Dials (RX, TX, Operating Temperature)
 		var rxDial = createDial('rx', _('Received Optical Power (RX)'));
 		var txDial = createDial('tx', _('Transmitted Optical Power (TX)'));
 		var tempDial = createDial('temp', _('Operating Temperature'));
