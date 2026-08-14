@@ -19,20 +19,32 @@ A responsive hardware telemetry dashboard for OpenWrt routers to monitor HSGQ an
 
 ---
 
-## Installation
+## Installation (OpenWrt `apk`)
 
-### 1. Via OpenWrt Package Manager (`apk`)
-Modern OpenWrt snapshot and master releases use Alpine Package Keeper (`apk`):
+Modern OpenWrt snapshot and master releases use Alpine Package Keeper (`apk`).
+
+### Trusted Installation with Signature Verification
+
+Import the project's public signing key to enable standard trusted verification:
 
 ```bash
-# Copy package to router
-scp luci-app-hsqg-ddm-1.0.0-r1.apk root@192.168.1.1:/tmp/
+# 1. Trust the signing key
+wget -qO /etc/apk/keys/luci-app-hsqg-ddm.pem https://raw.githubusercontent.com/AliLostInTheDark/luci-app-hsqg-ddm/main/keys/luci-app-hsqg-ddm.pem
 
-# Install package
-apk add --allow-untrusted /tmp/luci-app-hsqg-ddm-1.0.0-r1.apk
+# 2. Install the package
+apk add luci-app-hsqg-ddm-1.0.0-r1.apk
 ```
 
-### 2. Manual / Development Deployment
+#### Key Verification
+`keys/luci-app-hsqg-ddm.pem` is the **public** half of the EC keypair this package is signed with. You can verify its SHA-256 fingerprint before trusting:
+```
+090690322203551895a5ab1096e7abee6a0051448c423fd48315d15fe17b0e0c
+```
+
+---
+
+## Development Deployment
+
 Deploy directly over SSH from this repository:
 
 ```bash
@@ -50,6 +62,8 @@ luci-app-hsqg-ddm/
 ├── deploy.sh                                    # Quick SSH synchronization script
 ├── LICENSE                                      # Apache-2.0 License
 ├── README.md                                    # Documentation
+├── keys/
+│   └── luci-app-hsqg-ddm.pem                    # Verified public signing key
 ├── htdocs/
 │   └── luci-static/resources/view/hsqg_ddm/
 │       ├── dashboard.js                         # Main LuCI flexbox dashboard view
