@@ -23,7 +23,6 @@ An SFP ONU stick is a whole ONT in a cage, and it reports far more than the four
 - [Dashboard cards](#dashboard-cards)
 - [Settings](#settings)
 - [How it works](#how-it-works)
-- [Changelog](#changelog)
 - [License](#license)
 
 ## Highlights
@@ -127,34 +126,6 @@ An rpcd script at `/usr/libexec/rpcd/hsqg_ddm` logs into the module's Boa web in
 The login password is fed to `curl` on stdin rather than the command line, where any local user could read it from `ps`. The cookie jar and cache are created `0600`.
 
 The datasheet publishes wavelengths of 1310 nm upstream and 1490 nm downstream, SFF-8472 DDM compliance, and compliance with ITU-T G.984.2 and Amendment 1 — but no power budget class and no sensitivity or launch figures. Only port 80 is open, so there is no CLI path to the module's own SFF-8472 threshold bytes either. The optical limits shown are therefore ITU-T G.984.2 Class B+ figures used as a documented assumption; if an optic names a class in its vendor or part string, that is used instead and marked as coming from the hardware. The connector is likewise unreported — the datasheet states only `type: SC` and the stick ships with either polish.
-
-## Changelog
-
-### 1.0.1-r1
-
-**OMCI managed entities, as their own cards.** The stick's `omcicli` output is read and rendered per managed entity — Ethernet UNI (ME 11), VLAN tag filter (ME 84), extended VLAN tagging (ME 171), ONT-G (ME 256), VEIP (ME 329) and OLT identification (ME 131). The OLT vendor arrives as four packed ASCII bytes in a hex word and is decoded alongside the raw value.
-
-The CLI output is not clean and is not scraped as if it were. Instances are delimited by runs of `=`, every line is separated by a blank, ME 171 nests a repeating filter/treatment table, and some fields carry raw bytes rather than text. `omci.awk` parses the structure and sanitises to printable ASCII, so a firmware that emits control bytes cannot produce unparseable output. It runs identically under gawk, mawk and BusyBox awk.
-
-**OMCI state survives a page reload and a dark fibre.** Managed entities are provisioning state, not telemetry: they were being cleared whenever the link dropped or the page was reloaded, so a fault took the configuration view down with it exactly when it was most worth reading. The lifecycle is now tied to link state deliberately rather than incidentally.
-
-**A restart control for the stick**, declared under ACL write rather than read, because it changes device state rather than reporting it.
-
-**24 hours of history, held in RAM.** A circular time-series buffer with a background collector and its own init script, feeding full-width charts for RX, TX, temperature and bias. The range switcher covers 1h/6h/12h/24h with subdivisions that follow the selected window, hourly gridlines, and alarm colouring carried onto the header readings.
-
-**FEC reporting follows ITU-T G.984.3** OLT management terminology rather than the module's own wording.
-
-**Factory SFP calibration and descriptors** are carried from the published GPON specification instead of being inferred.
-
-**Laser off is shown as laser off** in the dial, the statistics, the chart and the threshold matrix when TX reads zero or null — a definite state the module reported, not a missing reading.
-
-Fixes: history telemetry is parsed with POSIX constructs that BusyBox `awk` accepts; threshold limits resolve through `buildThresholds` so alarm colouring stays correct on a dark fibre; the chart X-axis no longer labels the newest point `Now`; the TX dial key is corrected; and the key/value layout stays horizontal on small screens.
-
-The ACL no longer grants `get_info`. That method exists nowhere in the backend or the frontend — it was a permission for something that was never callable.
-
-### 1.0.0-r1
-
-First release.
 
 ## License
 
