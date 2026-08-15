@@ -1223,7 +1223,7 @@ return view.extend({
 
 			setTxt('info-onu-reg', onu.registered_status);
 			setTxt('info-sn', dev.gpon_sn);
-			setTxt('info-fec', ddm.fec_status);
+			setTxt('info-fec', (ddm.fec_status && ddm.fec_status !== 'Unknown') ? ddm.fec_status : _('DS / US: Managed by OLT (ITU-T G.984.3)'));
 
 			/* Optical alarms are reported from the device flags plus the RX evaluation. */
 			var alarmTxt = '--';
