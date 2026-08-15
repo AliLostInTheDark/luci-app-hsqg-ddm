@@ -22,7 +22,7 @@ return view.extend({
 
 		o = s.option(form.Flag, 'enabled', _('Enable Monitoring'),
 			_('Enable or disable live DDM telemetry collection from the HSGQ SFP module.'));
-		o.default = o.enabled;
+		o.default = '1';
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'host', _('Module IP Address'),
@@ -31,15 +31,19 @@ return view.extend({
 		o.default = '192.168.150.1';
 		o.rmempty = false;
 
+		/* Only the schemes the backend actually implements are offered. It scrapes
+		 * the module's Boa web interface, so Telnet and SSH were never reachable
+		 * paths -- listing them here meant the backend silently fell back to HTTP
+		 * while the UI claimed a different protocol was in use. */
 		o = s.option(form.ListValue, 'proto', _('Protocol'),
-			_('Diagnostic management protocol exposed by the module.'));
-		o.value('http', 'HTTP (Boa Web API - Recommended)');
-		o.value('telnet', 'Telnet');
-		o.value('ssh', 'SSH');
+			_('Scheme used to reach the module\'s Boa web interface.'));
+		o.value('http', _('HTTP (Boa web interface - recommended)'));
+		o.value('https', _('HTTPS (certificate not verified)'));
 		o.default = 'http';
+		o.rmempty = false;
 
 		o = s.option(form.Value, 'port', _('Port'),
-			_('Connection port on the SFP module (usually 80 for HTTP, 23 for Telnet, 22 for SSH).'));
+			_('Connection port on the SFP module. Defaults to 80 for HTTP and 443 for HTTPS.'));
 		o.datatype = 'port';
 		o.default = '80';
 		o.rmempty = false;
@@ -61,6 +65,14 @@ return view.extend({
 		o.value('metric', _('Metric System (°C, dBm)'));
 		o.value('imperial', _('Imperial System (°F, µW)'));
 		o.default = 'dual';
+
+		o = s.option(form.ListValue, 'optical_class', _('Optical Class'),
+			_('Transceiver optical class. This selects the receiver sensitivity and overload limits used as the Loss of Signal assert points, and the transmit launch power window. Leave at GPON Class B+ unless your SFP stick is documented otherwise.'));
+		o.value('bplus', _('GPON Class B+ (ITU-T G.984.2)'));
+		o.value('cplus', _('GPON Class C+ (ITU-T G.984.2 Amd.2)'));
+		o.value('epon_px20', _('EPON 1000BASE-PX20-U (IEEE 802.3ah)'));
+		o.default = 'bplus';
+		o.rmempty = false;
 
 		o = s.option(form.ListValue, 'poll_interval', _('Polling Interval'),
 			_('Frequency of live DDM telemetry collection.'));
@@ -91,17 +103,21 @@ return view.extend({
 			return callTestConnection().then(function(res) {
 				ui.hideModal();
 				if (res && res.connected) {
-					ui.addNotification(null, E('p', { 'style': 'color: #10b981; font-weight: bold;' },
-						_('Success: ') + res.message
+					ui.addNotification(null, E('p', { 'style': 'color: #8bc34a; font-weight: bold;' },
+						_('Success: ') + (res.message || _('Connected to the module.'))
 					), 'info');
 				} else {
-					ui.addNotification(null, E('p', { 'style': 'color: #ef4444; font-weight: bold;' },
-						_('Error: ') + (res && res.message ? res.message : _('Unable to connect to module.'))
+					/* The backend reports failures in `error`, not `message`. Reading
+					 * only `message` meant every failed test showed the generic
+					 * fallback instead of the reason the module gave. */
+					var why = (res && (res.error || res.message)) || _('Unable to connect to module.');
+					ui.addNotification(null, E('p', { 'style': 'color: #ff5252; font-weight: bold;' },
+						_('Error: ') + why
 					), 'danger');
 				}
 			}).catch(function(err) {
 				ui.hideModal();
-				ui.addNotification(null, E('p', { 'style': 'color: #ef4444;' },
+				ui.addNotification(null, E('p', { 'style': 'color: #ff5252;' },
 					_('RPC Error: ') + (err.message || err)
 				), 'danger');
 			});

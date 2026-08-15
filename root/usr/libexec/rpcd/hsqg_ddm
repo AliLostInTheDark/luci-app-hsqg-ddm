@@ -1,399 +1,952 @@
 #!/bin/sh
 # HSGQ / Realtek RTL960x SFP Stick DDM & Optical Diagnostics rpcd backend
-# High-performance caching & session-reuse engine for instant (<10ms) responses
+# Scrapes the Boa management web UI of the stick and emits the dashboard JSON contract.
+#
+# Standards referenced by the figures encoded below:
+#   ITU-T G.984.2            - GPON optical layer, Class B+ and Amendment 2 Class C+
+#   IEEE 802.3ah             - EPON 1000BASE-PX20-U
+#   SFF-8472                 - transceiver diagnostic monitoring thresholds
+#
+# Reporting policy: a value that could not be scraped is emitted as JSON null.
+# It is never replaced by a sentinel, because a sentinel is indistinguishable
+# from a genuine reading and turns a scrape failure into a fake hardware alarm.
+
+# Cookie and cache files live in /tmp and hold a session credential, so they are
+# created 0600 rather than world-readable.
+umask 077
 
 UCI_CONFIG="hsqg_ddm"
 COOKIE_FILE="/tmp/hsqg_stick_cookie.txt"
+TEST_COOKIE_FILE="/tmp/hsqg_stick_test_cookie.txt"
 CACHE_FILE="/tmp/hsqg_ddm_cache.json"
 CACHE_TTL=2 # Cache valid for 2 seconds
+LOCK_FILE="/tmp/hsqg_ddm.lock"
+
+# Instant-load window.
+#
+# Opening the LuCI page should paint immediately rather than waiting out an HTTP
+# scrape of six pages, so an entry older than CACHE_TTL is still served at once
+# and a refresh runs behind the response.
+#
+# Bounded on purpose. Serving arbitrarily old data would render a stick that died
+# minutes ago as a healthy link, which is the same "failure disguised as data"
+# this backend exists to avoid. Past MAX_STALE the caller waits for a real answer
+# so a genuinely dead module surfaces as an error.
+MAX_STALE=30
+
+# Age of the cache file in seconds, or a large number when it does not exist.
+cache_age() {
+	[ -f "$CACHE_FILE" ] || { echo 999999; return; }
+	_mt=$(date -r "$CACHE_FILE" +%s 2>/dev/null) || { echo 999999; return; }
+	[ -n "$_mt" ] || { echo 999999; return; }
+	echo $(( $(date +%s) - _mt ))
+}
+
+# Atomic write, so a concurrent reader never sees a half-written cache file.
+store_result() {
+	case "$1" in
+		*'"success": true'*)
+			printf '%s' "$1" > "${CACHE_FILE}.$$" 2>/dev/null &&
+				mv "${CACHE_FILE}.$$" "$CACHE_FILE" 2>/dev/null
+			rm -f "${CACHE_FILE}.$$" 2>/dev/null
+			return 0
+			;;
+	esac
+	return 1
+}
+
+#
+# ---------------------------------------------------------------- helpers ----
+#
+
+# Escape a shell string for interpolation into a JSON string literal.
+# Backslash must be handled first, then the quote, then control characters.
+json_escape_sh() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]/ /g'
+}
+
+# clamp <value> <min> <max> <default>
+# Returns the default for a non-numeric or empty value, otherwise the value
+# constrained to the inclusive range.
+clamp() {
+	case "$1" in
+		''|*[!0-9]*) echo "$4"; return ;;
+	esac
+	if [ "$1" -lt "$2" ]; then
+		echo "$2"
+	elif [ "$1" -gt "$3" ]; then
+		echo "$3"
+	else
+		echo "$1"
+	fi
+}
+
+# Percent-encode the characters that would otherwise be read as
+# application/x-www-form-urlencoded delimiters. The percent sign must go first
+# so that the encodings introduced afterwards are not themselves re-encoded.
+url_encode_form() {
+	printf '%s' "$1" | sed \
+		-e 's/%/%25/g' \
+		-e 's/&/%26/g' \
+		-e 's/+/%2B/g' \
+		-e 's/=/%3D/g' \
+		-e 's/#/%23/g' \
+		-e 's/ /%20/g'
+}
 
 get_config() {
+	# Defaults must match root/etc/config/hsqg_ddm so that an absent option
+	# behaves exactly as a freshly installed one.
+	ENABLED="1"
+	HOST="192.168.150.1"
+	PROTO="http"
+	PORT="80"
+	USER="admin"
+	PASS="Admin@1234567890"
+	TIMEOUT="3"
+	OPTICAL_CLASS="bplus"
+
 	if command -v uci >/dev/null 2>&1; then
-		ENABLED=$(uci -q get ${UCI_CONFIG}.main.enabled 2>/dev/null || echo "1")
-		HOST=$(uci -q get ${UCI_CONFIG}.main.host 2>/dev/null || echo "192.168.150.1")
-		USER=$(uci -q get ${UCI_CONFIG}.main.username 2>/dev/null || echo "admin")
-		PASS=$(uci -q get ${UCI_CONFIG}.main.password 2>/dev/null || echo "Admin@1234567890")
-		TIMEOUT=$(uci -q get ${UCI_CONFIG}.main.timeout 2>/dev/null || echo "2")
+		local v
+		v=$(uci -q get ${UCI_CONFIG}.main.enabled 2>/dev/null);       [ -n "$v" ] && ENABLED="$v"
+		v=$(uci -q get ${UCI_CONFIG}.main.host 2>/dev/null);          [ -n "$v" ] && HOST="$v"
+		v=$(uci -q get ${UCI_CONFIG}.main.proto 2>/dev/null);         [ -n "$v" ] && PROTO="$v"
+		v=$(uci -q get ${UCI_CONFIG}.main.port 2>/dev/null);          [ -n "$v" ] && PORT="$v"
+		v=$(uci -q get ${UCI_CONFIG}.main.username 2>/dev/null);      [ -n "$v" ] && USER="$v"
+		v=$(uci -q get ${UCI_CONFIG}.main.password 2>/dev/null);      [ -n "$v" ] && PASS="$v"
+		v=$(uci -q get ${UCI_CONFIG}.main.timeout 2>/dev/null);       [ -n "$v" ] && TIMEOUT="$v"
+		v=$(uci -q get ${UCI_CONFIG}.main.optical_class 2>/dev/null); [ -n "$v" ] && OPTICAL_CLASS="$v"
+	fi
+
+	# Validate every externally supplied value before it reaches curl or awk.
+	case "$PROTO" in
+		http|https) ;;
+		*) PROTO="http" ;;
+	esac
+
+	if [ "$PROTO" = "https" ]; then
+		PORT=$(clamp "$PORT" 1 65535 443)
 	else
-		ENABLED="1"
-		HOST="192.168.150.1"
-		USER="admin"
-		PASS="Admin@1234567890"
-		TIMEOUT="2"
+		PORT=$(clamp "$PORT" 1 65535 80)
+	fi
+
+	TIMEOUT=$(clamp "$TIMEOUT" 1 30 3)
+
+	case "$OPTICAL_CLASS" in
+		bplus|cplus|epon_px20) ;;
+		*) OPTICAL_CLASS="bplus" ;;
+	esac
+}
+
+# Compose the management base URL from proto/host/port, omitting the port when
+# it is the default for the scheme.
+base_url() {
+	# base_url <proto> <host> <port>
+	if [ "$1" = "https" ]; then
+		if [ "$3" = "443" ]; then echo "https://${2}"; else echo "https://${2}:${3}"; fi
+	else
+		if [ "$3" = "80" ]; then echo "http://${2}"; else echo "http://${2}:${3}"; fi
 	fi
 }
 
-# Fetch pages with session reuse
+# Emit a failure envelope. Every interpolated string is escaped.
+fail_json() {
+	# fail_json <host> <error message>
+	printf '{"success": false, "connected": false, "host": "%s", "optical_class": "%s", "error": "%s"}\n' \
+		"$(json_escape_sh "$1")" \
+		"$(json_escape_sh "$OPTICAL_CLASS")" \
+		"$(json_escape_sh "$2")"
+}
+
+#
+# ------------------------------------------------------------------ HTTP ----
+#
+# curl is a hard dependency (the Makefile declares DEPENDS +curl). The previous
+# wget fallback was non-functional: it discarded the login response and never
+# saved or replayed a cookie jar, so every subsequent page fetch was
+# unauthenticated. That made the caller report "connection timed out" for what
+# was really a silent authentication failure. BusyBox wget and uclient-fetch,
+# which are what /usr/bin/wget normally is on OpenWrt, have no cookie jar
+# support at all, so the branch could not be repaired portably. It has been
+# removed in favour of an explicit, accurate error.
+require_curl() {
+	command -v curl >/dev/null 2>&1
+}
+
+CURL_MISSING_MSG="curl is required by this package but was not found. Install it with: opkg install curl (or apk add curl on OpenWrt 24.10 and later)."
+
+# Fetch one page, presenting and refreshing the session cookie jar.
+http_get() {
+	# http_get <url>
+	if [ "$PROTO" = "https" ]; then
+		# These sticks present a self-signed certificate on their own management
+		# interface, so verification is relaxed for that local URL only.
+		curl -s -k -m "$TIMEOUT" -b "$COOKIE_FILE" -c "$COOKIE_FILE" "$1" 2>/dev/null
+	else
+		curl -s -m "$TIMEOUT" -b "$COOKIE_FILE" -c "$COOKIE_FILE" "$1" 2>/dev/null
+	fi
+}
+
+# Authenticate against the Boa login form.
+# The POST body is fed on stdin with --data @- so that the password never
+# appears in the process table, where any local user could read it with ps.
+http_login() {
+	# http_login <login url>
+	local body
+	body="username=$(url_encode_form "$USER")&password=$(url_encode_form "$PASS")&save=Login&submit-url=/admin/login.asp"
+
+	rm -f "$COOKIE_FILE"
+	if [ "$PROTO" = "https" ]; then
+		printf '%s' "$body" | curl -s -k -m "$TIMEOUT" -c "$COOKIE_FILE" --data @- "$1" >/dev/null 2>&1
+	else
+		printf '%s' "$body" | curl -s -m "$TIMEOUT" -c "$COOKIE_FILE" --data @- "$1" >/dev/null 2>&1
+	fi
+}
+
+# Fetch every page we scrape, reusing the session where possible.
 http_query_all() {
-	local host="$1"
-	local user="$2"
-	local pass="$3"
-	local timeout="$4"
+	# http_query_all <base url>
+	local base="$1"
+	local need_login=1
+	local age
+	local res_pon
 
-	if command -v curl >/dev/null 2>&1; then
-		# Check if we need to login (if cookie is missing or older than 5 minutes)
-		local NEED_LOGIN=1
-		if [ -f "$COOKIE_FILE" ]; then
-			local COOKIE_AGE=$(( $(date +%s) - $(date -r "$COOKIE_FILE" +%s 2>/dev/null || echo 0) ))
-			if [ "$COOKIE_AGE" -lt 300 ]; then
-				NEED_LOGIN=0
-			fi
+	if [ -f "$COOKIE_FILE" ]; then
+		age=$(( $(date +%s) - $(date -r "$COOKIE_FILE" +%s 2>/dev/null || echo 0) ))
+		if [ "$age" -ge 0 ] && [ "$age" -lt 300 ]; then
+			need_login=0
 		fi
-
-		if [ "$NEED_LOGIN" -eq 1 ]; then
-			curl -s -m "$timeout" -c "$COOKIE_FILE" \
-				-d "username=${user}&password=${pass}&save=Login&submit-url=/admin/login.asp" \
-				"http://${host}/boaform/admin/formLogin" >/dev/null 2>&1
-		fi
-
-		# Query status pages
-		local RES_PON=$(curl -s -m "$timeout" -b "$COOKIE_FILE" "http://${host}/status_pon.asp" 2>/dev/null)
-		
-		# If session expired, login and retry once
-		if ! echo "$RES_PON" | grep -qi 'PON Status'; then
-			curl -s -m "$timeout" -c "$COOKIE_FILE" \
-				-d "username=${user}&password=${pass}&save=Login&submit-url=/admin/login.asp" \
-				"http://${host}/boaform/admin/formLogin" >/dev/null 2>&1
-			RES_PON=$(curl -s -m "$timeout" -b "$COOKIE_FILE" "http://${host}/status_pon.asp" 2>/dev/null)
-		fi
-
-		echo "===STATUS_PON==="
-		echo "$RES_PON"
-		echo "===STATUS==="
-		curl -s -m "$timeout" -b "$COOKIE_FILE" "http://${host}/status.asp" 2>/dev/null
-		echo "===GPON==="
-		curl -s -m "$timeout" -b "$COOKIE_FILE" "http://${host}/gpon.asp" 2>/dev/null
-		echo "===STATS==="
-		curl -s -m "$timeout" -b "$COOKIE_FILE" "http://${host}/stats.asp" 2>/dev/null
-	elif command -v wget >/dev/null 2>&1; then
-		wget -q -T "$timeout" -O - --post-data="username=${user}&password=${pass}&save=Login&submit-url=/admin/login.asp" "http://${host}/boaform/admin/formLogin" >/dev/null 2>&1
-		echo "===STATUS_PON==="
-		wget -q -T "$timeout" -O - "http://${host}/status_pon.asp" 2>/dev/null
-		echo "===STATUS==="
-		wget -q -T "$timeout" -O - "http://${host}/status.asp" 2>/dev/null
-		echo "===GPON==="
-		wget -q -T "$timeout" -O - "http://${host}/gpon.asp" 2>/dev/null
-		echo "===STATS==="
-		wget -q -T "$timeout" -O - "http://${host}/stats.asp" 2>/dev/null
 	fi
+
+	[ "$need_login" -eq 1 ] && http_login "${base}/boaform/admin/formLogin"
+
+	res_pon=$(http_get "${base}/status_pon.asp")
+
+	# If the session had expired, log in and retry once.
+	if ! echo "$res_pon" | grep -qi 'PON Status'; then
+		http_login "${base}/boaform/admin/formLogin"
+		res_pon=$(http_get "${base}/status_pon.asp")
+	fi
+
+	echo "===STATUS_PON==="
+	echo "$res_pon"
+	echo "===STATUS==="
+	http_get "${base}/status.asp"
+	echo "===GPON==="
+	http_get "${base}/gpon.asp"
+	echo "===OMCI_INFO==="
+	http_get "${base}/omci_info.asp"
+	echo "===STATS==="
+	http_get "${base}/stats.asp"
+	echo "===VLAN==="
+	http_get "${base}/vlan.asp"
 }
 
-# Parse cell value from HTML
-parse_cell() {
-	local text="$1"
-	local key="$2"
-	local default_val="$3"
+#
+# ----------------------------------------------------------------- parser ----
+#
 
-	local line=$(echo "$text" | grep -i -A 2 "$key" | head -n 3 | tr '\n' ' ' | sed -e 's/<[^>]*>/ /g' -e 's/&nbsp;/ /g')
-	local val=$(echo "$line" | sed -e "s/.*$key//" -e 's/^[ :	]*//' | awk '{print $1}')
+parse_html_single_pass() {
+	local raw_data="$1"
+	local host="$2"
+	local oclass="$3"
+	local now_ts="$(date +%s)"
 
-	if [ -n "$val" ] && [ "$val" != "" ]; then
-		if echo "$val" | grep -qiE 'inf|nan'; then
-			echo "-40.0"
-		else
-			echo "$val"
-		fi
-	else
-		echo "$default_val"
-	fi
-}
-
-fetch_telemetry() {
-	get_config
-
-	if [ "$ENABLED" != "1" ]; then
-		cat <<EOF
-{
-	"success": false,
-	"connected": false,
-	"error": "Monitoring has been disabled in the configuration"
-}
-EOF
-		return
-	fi
-
-	# Return cached response if fresh (instant response)
-	if [ -f "$CACHE_FILE" ]; then
-		local CACHE_AGE=$(( $(date +%s) - $(date -r "$CACHE_FILE" +%s 2>/dev/null || echo 999) ))
-		if [ "$CACHE_AGE" -le "$CACHE_TTL" ]; then
-			cat "$CACHE_FILE"
-			return
-		fi
-	fi
-
-	local RAW_HTML=$(http_query_all "$HOST" "$USER" "$PASS" "$TIMEOUT")
-
-	if [ -z "$RAW_HTML" ] || ! echo "$RAW_HTML" | grep -qi 'PON Status'; then
-		# If query fails but cache exists, return stale cache as fallback
-		if [ -f "$CACHE_FILE" ]; then
-			cat "$CACHE_FILE"
-			return
-		fi
-
-		cat <<EOF
-{
-	"success": false,
-	"connected": false,
-	"host": "$HOST",
-	"error": "Unable to connect to the HSGQ SFP module at http://$HOST"
-}
-EOF
-		return
-	fi
-
-	local PON_HTML=$(echo "$RAW_HTML" | sed -n '/===STATUS_PON===/,/===STATUS===/p')
-	local STAT_HTML=$(echo "$RAW_HTML" | sed -n '/===STATUS===/,/===GPON===/p')
-	local GPON_HTML=$(echo "$RAW_HTML" | sed -n '/===GPON===/,/===STATS===/p')
-	local STATS_HTML=$(echo "$RAW_HTML" | sed -n '/===STATS===/,$p')
-
-	# 1. Real-time DDM Metrics from status_pon.asp
-	local TEMP=$(parse_cell "$PON_HTML" "Temperature" "45.0")
-	local VOLT=$(parse_cell "$PON_HTML" "Voltage" "3.30")
-	local TX_PWR=$(parse_cell "$PON_HTML" "Tx Power" "-40.0")
-	local RX_PWR=$(parse_cell "$PON_HTML" "Rx Power" "-40.0")
-	local BIAS=$(parse_cell "$PON_HTML" "Bias Current" "0.0")
-	local ONU_STATE=$(parse_cell "$PON_HTML" "ONU State" "O1")
-	local ONU_ID=$(parse_cell "$PON_HTML" "ONU ID" "255")
-	local OLT_VENDOR=$(echo "$PON_HTML" | grep -i -A 2 "Olt VendorId" | head -n 3 | sed -e 's/<[^>]*>/ /g' -e 's/Olt VendorId//I' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$OLT_VENDOR" ] && OLT_VENDOR="None (Standby)"
-
-	local REG_STAT=$(echo "$PON_HTML" | grep -i -A 2 "Registered Status" | tail -n 1 | sed -e 's/<[^>]*>/ /g' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$REG_STAT" ] && REG_STAT="Not Registered"
-
-	local MACKEY_STAT=$(echo "$PON_HTML" | grep -i -A 2 "Mackey Status" | tail -n 1 | sed -e 's/<[^>]*>/ /g' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$MACKEY_STAT" ] && MACKEY_STAT="success"
-
-	# 2. System Status Metrics from status.asp
-	local DEV_NAME=$(parse_cell "$STAT_HTML" "Device Name" "JCO4032")
-	local VENDOR_ID=$(parse_cell "$STAT_HTML" "Vendor ID" "SRCM")
-	local UPTIME=$(echo "$STAT_HTML" | grep -i -A 2 "Uptime" | head -n 3 | sed -e 's/<[^>]*>/ /g' -e 's/Uptime//I' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$UPTIME" ] && UPTIME="2 days, 13:42"
-
-	local FW_VER=$(echo "$STAT_HTML" | grep -i -A 2 "Firmware Version" | head -n 3 | sed -e 's/<[^>]*>/ /g' -e 's/Firmware Version//I' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$FW_VER" ] && FW_VER="V1.1.6-240202"
-
-	local HW_VER=$(echo "$STAT_HTML" | grep -i -A 2 "Hardware Version" | head -n 3 | sed -e 's/<[^>]*>/ /g' -e 's/Hardware Version//I' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$HW_VER" ] && HW_VER="V1.0"
-
-	local CPU_USE=$(echo "$STAT_HTML" | grep -i -A 2 "CPU Usage" | head -n 3 | sed -e 's/<[^>]*>/ /g' -e 's/CPU Usage//I' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$CPU_USE" ] && CPU_USE="0%"
-
-	local MEM_USE=$(echo "$STAT_HTML" | grep -i -A 2 "Memory Usage" | head -n 3 | sed -e 's/<[^>]*>/ /g' -e 's/Memory Usage//I' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$MEM_USE" ] && MEM_USE="49%"
-
-	local MAC_ADDR=$(parse_cell "$STAT_HTML" "MAC Address" "4086cb000000")
-	local LAN_STAT=$(echo "$STAT_HTML" | grep -i -A 2 "LAN1 Status" | head -n 3 | sed -e 's/<[^>]*>/ /g' -e 's/LAN1 Status//I' -e 's/^[ \t]*//' -e 's/[ \t]*$//' | tr -d '\r\n')
-	[ -z "$LAN_STAT" ] && LAN_STAT="Up, 1000Mbps(10G->1G)"
-
-	local VLAN_ID=$(echo "$STAT_HTML" | grep -i -A 4 "nas0_0" | grep -oE '[0-9]{2,5}' | head -n 1)
-	[ -z "$VLAN_ID" ] && VLAN_ID="1015"
-
-	# 3. GPON & OMCI Telemetry from gpon.asp
-	local GPON_SN=$(echo "$GPON_HTML" | grep -i '<input.*name="fmgpon_sn"' | sed -e 's/.*value="//' -e 's/".*//' | tr -d ' \r\n')
-	[ -z "$GPON_SN" ] && GPON_SN="SCOM4D361B06"
-
-	local OMCI_SW1=$(echo "$GPON_HTML" | grep -i '<input.*name="omci_sw_ver1"' | sed -e 's/.*value="//' -e 's/".*//' | tr -d ' \r\n')
-	[ -z "$OMCI_SW1" ] && OMCI_SW1="V1.1.8-240408"
-
-	local OMCI_SW2=$(echo "$GPON_HTML" | grep -i '<input.*name="omci_sw_ver2"' | sed -e 's/.*value="//' -e 's/".*//' | tr -d ' \r\n')
-	[ -z "$OMCI_SW2" ] && OMCI_SW2="V1.1.6-240202"
-
-	local MACKEY=$(echo "$GPON_HTML" | grep -i '<input.*name="mackey"' | sed -e 's/.*value="//' -e 's/".*//' | tr -d ' \r\n')
-	[ -z "$MACKEY" ] && MACKEY="a69cd4e034f72be49ecbdd7755113e0a"
-
-	# 4. Interface Packet Counters from stats.asp
-	local LAN_LINE=$(echo "$STATS_HTML" | grep -A 8 -i '>LAN<' | sed -e 's/<[^>]*>/ /g' | tr '\n' ' ' | tr -s ' ')
-	local LAN_RX_PKTS=$(echo "$LAN_LINE" | awk '{print $2}')
-	local LAN_RX_ERR=$(echo "$LAN_LINE" | awk '{print $3}')
-	local LAN_RX_DROP=$(echo "$LAN_LINE" | awk '{print $4}')
-	local LAN_TX_PKTS=$(echo "$LAN_LINE" | awk '{print $5}')
-	local LAN_TX_ERR=$(echo "$LAN_LINE" | awk '{print $6}')
-	local LAN_TX_DROP=$(echo "$LAN_LINE" | awk '{print $7}')
-	[ -z "$LAN_RX_PKTS" ] && LAN_RX_PKTS="0"
-	[ -z "$LAN_RX_ERR" ] && LAN_RX_ERR="0"
-	[ -z "$LAN_RX_DROP" ] && LAN_RX_DROP="0"
-	[ -z "$LAN_TX_PKTS" ] && LAN_TX_PKTS="0"
-	[ -z "$LAN_TX_ERR" ] && LAN_TX_ERR="0"
-	[ -z "$LAN_TX_DROP" ] && LAN_TX_DROP="0"
-
-	local OMCC_VER=$(echo "$GPON_HTML" | grep -i '<input.*name="omcc_ver"' | sed -e 's/.*value="//' -e 's/".*//' | tr -d ' \r\n')
-	[ -z "$OMCC_VER" ] && OMCC_VER="160"
-
-	# Clean numeric outputs
-	TEMP=$(echo "$TEMP" | grep -oE '[-+]?[0-9]+(\.[0-9]+)?' | head -n 1)
-	[ -z "$TEMP" ] && TEMP="45.0"
-	VOLT=$(echo "$VOLT" | grep -oE '[-+]?[0-9]+(\.[0-9]+)?' | head -n 1)
-	[ -z "$VOLT" ] && VOLT="3.30"
-	TX_PWR=$(echo "$TX_PWR" | grep -oE '[-+]?[0-9]+(\.[0-9]+)?' | head -n 1)
-	[ -z "$TX_PWR" ] && TX_PWR="-40.0"
-	RX_PWR=$(echo "$RX_PWR" | grep -oE '[-+]?[0-9]+(\.[0-9]+)?' | head -n 1)
-	[ -z "$RX_PWR" ] && RX_PWR="-40.0"
-	BIAS=$(echo "$BIAS" | grep -oE '[-+]?[0-9]+(\.[0-9]+)?' | head -n 1)
-	[ -z "$BIAS" ] && BIAS="0.0"
-
-	# Standard Signal Assessment
-	local RX_STATUS="normal"
-	local RX_MSG="Optimal Optical Signal"
-	local IS_CUT=$(awk -v val="$RX_PWR" 'BEGIN { print (val <= -35.0) ? 1 : 0 }')
-	local IS_LOW=$(awk -v val="$RX_PWR" 'BEGIN { print (val < -27.0 && val > -35.0) ? 1 : 0 }')
-	local IS_HIGH=$(awk -v val="$RX_PWR" 'BEGIN { print (val > -8.0) ? 1 : 0 }')
-
-	if [ "$IS_CUT" = "1" ]; then
-		RX_STATUS="low_alarm"
-		RX_MSG="No Signal"
-	elif [ "$IS_LOW" = "1" ]; then
-		RX_STATUS="low_warn"
-		RX_MSG="Low Power"
-	elif [ "$IS_HIGH" = "1" ]; then
-		RX_STATUS="high_alarm"
-		RX_MSG="Signal Overload"
-	else
-		RX_STATUS="normal"
-		RX_MSG="Optimal Signal"
-	fi
-
-	local ONU_DESC="O1 - Initialisation / Standby State"
-	if [ "$ONU_STATE" = "O5" ]; then
-		ONU_DESC="O5 - Operational (Synchronised & Registered)"
-	elif [ "$ONU_STATE" = "O4" ]; then
-		ONU_DESC="O4 - Ranging State"
-	elif [ "$ONU_STATE" = "O3" ]; then
-		ONU_DESC="O3 - Serial Number Verification State"
-	elif [ "$ONU_STATE" = "O2" ]; then
-		ONU_DESC="O2 - Standby State"
-	elif [ "$ONU_STATE" = "O6" ]; then
-		ONU_DESC="O6 - Intermittent State"
-	elif [ "$ONU_STATE" = "O7" ]; then
-		ONU_DESC="O7 - Emergency Stop State"
-	fi
-
-	# Generate JSON output and save to CACHE_FILE
-	cat <<EOF > "$CACHE_FILE"
-{
-	"success": true,
-	"connected": true,
-	"host": "$HOST",
-	"timestamp": $(date +%s),
-	"ddm": {
-		"rx_power_dbm": $RX_PWR,
-		"tx_power_dbm": $TX_PWR,
-		"temperature_c": $TEMP,
-		"voltage_v": $VOLT,
-		"bias_current_ma": $BIAS,
-		"rx_status": "$RX_STATUS",
-		"rx_message": "$RX_MSG"
-	},
-	"onu": {
-		"state": "$ONU_STATE",
-		"onu_id": "$ONU_ID",
-		"olt_vendor": "$OLT_VENDOR",
-		"registered_status": "$REG_STAT",
-		"mackey_status": "$MACKEY_STAT",
-		"description": "$ONU_DESC"
-	},
-	"device": {
-		"device_name": "$DEV_NAME",
-		"vendor_id": "$VENDOR_ID",
-		"gpon_sn": "$GPON_SN",
-		"uptime": "$UPTIME",
-		"firmware": "$FW_VER",
-		"hardware": "$HW_VER",
-		"omci_sw1": "$OMCI_SW1",
-		"omci_sw2": "$OMCI_SW2",
-		"omcc_version": "$OMCC_VER",
-		"cpu_usage": "$CPU_USE",
-		"mem_usage": "$MEM_USE",
-		"mac": "$MAC_ADDR",
-		"mackey": "$MACKEY",
-		"lan_status": "$LAN_STAT",
-		"vlan_id": "$VLAN_ID",
-		"lan_rx_pkts": "$LAN_RX_PKTS",
-		"lan_rx_err": "$LAN_RX_ERR",
-		"lan_rx_drop": "$LAN_RX_DROP",
-		"lan_tx_pkts": "$LAN_TX_PKTS",
-		"lan_tx_err": "$LAN_TX_ERR",
-		"lan_tx_drop": "$LAN_TX_DROP"
-	},
-	"module": {
-		"vendor": "$VENDOR_ID",
-		"part_number": "$DEV_NAME",
-		"serial_number": "$GPON_SN",
-		"mac_address": "$MAC_ADDR",
-		"wavelength_tx": "1310 nm",
-		"wavelength_rx": "1490 nm",
-		"connector": "SC-APC (Single Mode)",
-		"calibration": "Internal (A2h Map)",
-		"compliance": "SFF-8472 / ITU-T G.984"
-	},
-	"thresholds": {
-		"temp_high_alarm": 85.0,
-		"temp_low_alarm": -40.0,
-		"temp_high_warn": 75.0,
-		"temp_low_warn": -10.0,
-		"voltage_high_alarm": 3.70,
-		"voltage_low_alarm": 2.90,
-		"voltage_high_warn": 3.55,
-		"voltage_low_warn": 3.05,
-		"bias_high_alarm": 70.0,
-		"bias_low_alarm": 1.0,
-		"bias_high_warn": 60.0,
-		"bias_low_warn": 2.0,
-		"tx_pwr_high_alarm": 6.5,
-		"tx_pwr_low_alarm": -1.0,
-		"tx_pwr_high_warn": 5.0,
-		"tx_pwr_low_warn": 0.5,
-		"rx_pwr_high_alarm": -7.0,
-		"rx_pwr_low_alarm": -30.0,
-		"rx_pwr_high_warn": -8.0,
-		"rx_pwr_low_warn": -27.0
+	echo "$raw_data" | awk -v host="$host" -v ts="$now_ts" -v oclass="$oclass" '
+	# Escape a device-controlled string for use inside a JSON string literal.
+	# Everything on these pages is attacker-influenceable, and a single stray
+	# quote previously produced invalid JSON, failing the whole rpc call.
+	function jesc(s) {
+		gsub(/[\001-\037\177]/, " ", s);
+		gsub(/\\/, "\\\\", s);
+		gsub(/"/, "\\\"", s);
+		return s;
 	}
-}
-EOF
-	cat "$CACHE_FILE"
+
+	# Emit a number, or JSON null when the value was never parsed.
+	function jnum(v, ok, fmt) {
+		if (!ok) return "null";
+		return sprintf(fmt, v);
+	}
+
+	# Emit a bare JSON integer, guaranteeing syntactic validity.
+	function jint(s) {
+		if (s ~ /^[0-9]+$/) return s;
+		return "0";
+	}
+
+	function firstnum(s) {
+		if (match(s, /[0-9]+/)) return substr(s, RSTART, RLENGTH);
+		return "";
+	}
+
+	function trim(s) {
+		gsub(/\r/, "", s);
+		sub(/^[ \t]+/, "", s);
+		sub(/[ \t]+$/, "", s);
+		return s;
+	}
+
+	# Arm a bounded lookahead for the value belonging to a table label.
+	function expect(field) {
+		pend = field;
+		pend_left = MAX_LOOKAHEAD;
+	}
+
+	BEGIN {
+		# Bounded lookahead. The previous implementation used sticky in_* flags
+		# that stayed set until they matched, so a label whose value line was
+		# missing caused the next line anywhere below it containing a number to
+		# be captured as that field. The window is now closed after a small
+		# number of lines and the field is left unparsed.
+		MAX_LOOKAHEAD = 3;
+		pend = ""; pend_left = 0;
+
+		hx = "[0-9a-fA-F]";
+		MACRE_COLON = hx hx ":" hx hx ":" hx hx ":" hx hx ":" hx hx ":" hx hx;
+		MACRE_FLAT  = hx hx hx hx hx hx hx hx hx hx hx hx;
+
+		# Optical class profiles. These are the only optical figures used
+		# anywhere in this backend; the dashboard derives its bands from the
+		# thresholds block emitted below, so the table and the badges cannot
+		# disagree.
+		if (oclass == "cplus") {
+			# ITU-T G.984.2 Amendment 2, Class C+
+			rx_sens = -32.0; rx_ovld = -12.0; tx_min = 0.5; tx_max = 5.0;
+			oc_cit = "ITU-T G.984.2 Amd.2 Class C+";
+		} else if (oclass == "epon_px20") {
+			# IEEE 802.3ah, 1000BASE-PX20-U (ONU side)
+			rx_sens = -24.0; rx_ovld = -3.0; tx_min = 2.0; tx_max = 7.0;
+			oc_cit = "IEEE 802.3ah 1000BASE-PX20-U";
+		} else {
+			# ITU-T G.984.2, Class B+ (default)
+			oclass = "bplus";
+			rx_sens = -27.0; rx_ovld = -8.0; tx_min = 0.5; tx_max = 5.0;
+			oc_cit = "ITU-T G.984.2 Class B+";
+		}
+		wl_rx = 1490; wl_tx = 1310;
+
+		# Warning bands are derived, never listed separately, so they can never
+		# drift out of step with the alarm limits above.
+		rx_low_warn  = rx_sens + 1.0;
+		rx_high_warn = rx_ovld - 1.0;
+		tx_low_warn  = tx_min  + 0.5;
+		tx_high_warn = tx_max  - 0.5;
+
+		# SFF-8472 diagnostic thresholds, independent of the optical class.
+		temp_low_alarm  = -40.0; temp_low_warn   = -10.0;
+		temp_high_warn  =  75.0; temp_high_alarm =  85.0;
+		volt_low_alarm  =   2.90; volt_low_warn  =   3.05;
+		volt_high_warn  =   3.55; volt_high_alarm =  3.70;
+		bias_low_alarm  =   1.0; bias_low_warn   =   2.0;
+		bias_high_warn  =  60.0; bias_high_alarm =  70.0;
+
+		# Every DDM reading starts unparsed. has_* records whether the scrape
+		# actually saw the value; the numeric slot is meaningless until then.
+		has_temp = 0; has_volt = 0; has_tx = 0; has_rx = 0; has_bias = 0;
+		temp = 0; volt = 0; tx_pwr = 0; rx_pwr = 0; bias = 0;
+		tx_off = 0;
+
+		onu_state = "--"; onu_id = "--"; olt_vendor = "--";
+		reg_stat = "Not Registered"; mackey_stat = "--";
+		dev_name = "--"; vendor_id = "--"; uptime = "--";
+		# Reported by the optic itself; empty until the module states them.
+		optic_vendor = ""; optic_part = "";
+		fw_ver = "--"; hw_ver = "--"; cpu_use = "--"; mem_use = "--";
+		mac_addr = "--"; lan_stat = "--"; vlan_id = "--";
+		gpon_sn = "--"; omci_sw1 = "--"; omci_sw2 = "--";
+		omcc_ver = "--"; mackey = "--"; oui = "--";
+		fec_status = "Unknown";
+		rx_pkts = "0"; rx_err = "0"; rx_drop = "0"; tx_pkts = "0"; tx_err = "0"; tx_drop = "0";
+		pon_bytes_sent = "0"; pon_bytes_recv = "0"; pon_pkts_sent = "0"; pon_pkts_recv = "0";
+		pon_uni_sent = "0"; pon_uni_recv = "0"; pon_multi_sent = "0"; pon_multi_recv = "0";
+		pon_broad_sent = "0"; pon_broad_recv = "0"; fec_errors = "0"; hec_errors = "0";
+		in_stats = 0;
+	}
+
+	# Strip markup, then decode the entities Boa emits, in that order.
+	{
+		clean = $0;
+		gsub(/<[^>]*>/, " ", clean);
+		gsub(/&nbsp;/, " ", clean);
+		gsub(/&amp;/, "\\&", clean);
+		gsub(/&lt;/, "<", clean);
+		gsub(/&gt;/, ">", clean);
+		gsub(/&quot;/, "\"", clean);
+	}
+
+	# ---- Table labels. Each arms a bounded lookahead for its value line. ----
+	tolower($0) ~ /<b>temperature<\/b>/      { expect("temp");   next; }
+	tolower($0) ~ /<b>voltage<\/b>/          { expect("volt");   next; }
+	tolower($0) ~ /<b>tx power<\/b>/         { expect("tx");     next; }
+	tolower($0) ~ /<b>rx power<\/b>/         { expect("rx");     next; }
+	tolower($0) ~ /<b>bias current<\/b>/     { expect("bias");   next; }
+	tolower($0) ~ /<b>firmware version<\/b>/ { expect("fw");     next; }
+	tolower($0) ~ /<b>hardware version<\/b>/ { expect("hw");     next; }
+	tolower($0) ~ /<b>uptime<\/b>/           { expect("uptime"); next; }
+	tolower($0) ~ /<b>cpu usage<\/b>/        { expect("cpu");    next; }
+	tolower($0) ~ /<b>memory usage<\/b>/     { expect("mem");    next; }
+	tolower($0) ~ /<b>mac address<\/b>/      { expect("mac");    next; }
+	tolower($0) ~ /<b>lan1/                  { expect("lan");    next; }
+
+	# The identity reported by the optical module itself. On this firmware the rows
+	# sit inside an HTML comment on status_pon.asp, so they were never parsed. They
+	# are the only place the transceiver identifies itself -- the device_name and
+	# vendor_id read elsewhere come from the OMCI configuration pages and describe
+	# the emulated identity of the stick, not the optic actually fitted to it.
+	tolower($0) ~ /<b>vendor name<\/b>/      { expect("ovendor"); next; }
+	tolower($0) ~ /<b>part number<\/b>/      { expect("opart");   next; }
+
+	# ---- The single bounded value collector. ----
+	pend != "" {
+		got = 0;
+
+		if (pend == "temp") {
+			if (match(clean, /[-+]?[0-9]+\.[0-9]+/)) {
+				temp = substr(clean, RSTART, RLENGTH) + 0; has_temp = 1; got = 1;
+			}
+		} else if (pend == "volt") {
+			if (match(clean, /[0-9]+\.[0-9]+/)) {
+				volt = substr(clean, RSTART, RLENGTH) + 0; has_volt = 1; got = 1;
+			}
+		} else if (pend == "tx") {
+			if (match(clean, /[-+]?[0-9]+\.[0-9]+/)) {
+				tx_pwr = substr(clean, RSTART, RLENGTH) + 0; has_tx = 1; got = 1;
+			} else if (tolower(clean) ~ /-inf/) {
+				# The transmitter reports -inf when the laser is off. That is a
+				# genuine state, not a reading, so the power stays null and the
+				# state is reported separately.
+				tx_off = 1; got = 1;
+			}
+		} else if (pend == "rx") {
+			if (match(clean, /[-+]?[0-9]+\.[0-9]+/)) {
+				rx_pwr = substr(clean, RSTART, RLENGTH) + 0; has_rx = 1; got = 1;
+			}
+		} else if (pend == "bias") {
+			if (match(clean, /[0-9]+\.[0-9]+/)) {
+				bias = substr(clean, RSTART, RLENGTH) + 0; has_bias = 1; got = 1;
+			}
+		} else if (pend == "ovendor") {
+			v = trim(clean);
+			if (v != "" && v !~ /^-+$/) { optic_vendor = v; got = 1; }
+		} else if (pend == "opart") {
+			v = trim(clean);
+			if (v != "" && v !~ /^-+$/) { optic_part = v; got = 1; }
+		} else if (pend == "fw") {
+			if (match(clean, /V[0-9][0-9A-Za-z._-]+/)) {
+				fw_ver = substr(clean, RSTART, RLENGTH); got = 1;
+			}
+		} else if (pend == "hw") {
+			if (match(clean, /V[0-9][0-9A-Za-z._-]+/)) {
+				hw_ver = substr(clean, RSTART, RLENGTH); got = 1;
+			}
+		} else if (pend == "uptime") {
+			if (match(clean, /([0-9]+[ \t]*days?,?[ \t]*)?[0-9]+:[0-9]+(:[0-9]+)?/)) {
+				uptime = trim(substr(clean, RSTART, RLENGTH)); got = 1;
+			}
+		} else if (pend == "cpu") {
+			if (match(clean, /[0-9]+%/)) {
+				cpu_use = substr(clean, RSTART, RLENGTH); got = 1;
+			}
+		} else if (pend == "mem") {
+			if (match(clean, /[0-9]+%/)) {
+				mem_use = substr(clean, RSTART, RLENGTH); got = 1;
+			}
+		} else if (pend == "mac") {
+			if (match(clean, MACRE_COLON)) {
+				mac_addr = substr(clean, RSTART, RLENGTH); got = 1;
+			} else if (match(clean, MACRE_FLAT)) {
+				mac_addr = substr(clean, RSTART, RLENGTH); got = 1;
+			}
+		} else if (pend == "lan") {
+			# tolower preserves length, so RSTART indexes the original string.
+			# Down is matched as well as Up, otherwise a down port is reported
+			# as no data rather than as being down.
+			lcl = tolower(clean);
+			if (match(lcl, /up|down/)) {
+				lan_stat = trim(substr(clean, RSTART));
+				if (lan_stat != "") got = 1;
+			}
+		}
+
+		pend_left = pend_left - 1;
+		if (got || pend_left <= 0) { pend = ""; pend_left = 0; }
+	}
+
+	# ---- Single-line status elements. ----
+	tolower($0) ~ /<b>onu state<\/b>/ && match(clean, /O[0-7]/) { onu_state = substr(clean, RSTART, RLENGTH); }
+	tolower($0) ~ /<b>onu id<\/b>/ && match(clean, /[0-9]+/) { onu_id = substr(clean, RSTART, RLENGTH); }
+	tolower($0) ~ /<b>olt vendorid<\/b>/ {
+		ov = clean;
+		sub(/^.*[Vv]endor[Ii][Dd][ :\t]*/, "", ov);
+		sub(/[ \t].*$/, "", ov);
+		gsub(/[^A-Za-z0-9_]/, "", ov);
+		if (ov != "") olt_vendor = ov;
+	}
+	tolower($0) ~ /registered status/ {
+		# The row renders as "Registered Status  Registered Status  Not Registered":
+		# the label itself contains the word "Registered", and the awk match() call takes
+		# the leftmost hit, so matching the raw line always returned "Registered"
+		# even when the module reported "Not Registered". Alternation order cannot
+		# fix that -- the label simply comes first. Strip the label, then read the
+		# value from what is left.
+		reg_line = clean;
+		gsub(/[Rr]egistered[ \t]+[Ss]tatus/, " ", reg_line);
+		if (match(reg_line, /Not Registered|Registered/)) reg_stat = substr(reg_line, RSTART, RLENGTH);
+	}
+	tolower($0) ~ /mackey status/ {
+		if (match(clean, /success|failed/)) mackey_stat = substr(clean, RSTART, RLENGTH);
+	}
+
+	# Forward error correction state, read rather than assumed. It stays
+	# "Unknown" when the pages do not report it.
+	tolower($0) ~ /fec/ && tolower($0) !~ /fec errors/ {
+		lcf = tolower(clean);
+		if (lcf ~ /fec[^a-z]*(status|mode)?[^a-z]*(enabled|enable|on)/) fec_status = "Enabled";
+		else if (lcf ~ /fec[^a-z]*(status|mode)?[^a-z]*(disabled|disable|off)/) fec_status = "Disabled";
+	}
+
+	# ---- OMCI and GPON settings, read from form field values. ----
+	tolower($0) ~ /name="omci_vendor_id"/ && match($0, /value="([^"]+)"/) {
+		vendor_id = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+	tolower($0) ~ /fmgpon_sn/ && match($0, /value="([^"]+)"/) {
+		gpon_sn = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+	tolower($0) ~ /omci_sw_ver1/ && match($0, /value="([^"]+)"/) {
+		omci_sw1 = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+	tolower($0) ~ /omci_sw_ver2/ && match($0, /value="([^"]+)"/) {
+		omci_sw2 = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+
+	# OMCC version. The previous rule took the first number anywhere on the
+	# line, which included numbers inside markup such as width="65%". Anchor to
+	# the text content of the element that carries the id, and derive the hex
+	# form from the parsed value instead of asserting a fixed 0xA0.
+	/omcc_ver_value/ {
+		# The firmware publishes this as a JavaScript initialiser, not as element
+		# text:
+		#     var omcc_ver_value = 160;
+		# An earlier revision looked for ">value<" and therefore never matched,
+		# leaving the field empty. Anchoring to the assignment is both correct for
+		# this layout and still immune to stray numbers elsewhere in the markup
+		# (width="60%" and the like), which is what taking the first number on the
+		# line would have picked up.
+		#
+		# The same file also contains "omcc_ver.value = omcc_ver_value;" - note the
+		# dot rather than the underscore - where the token is followed by ";" and so
+		# correctly fails to match.
+		op = index($0, "omcc_ver_value");
+		orest = substr($0, op + 14);
+		if (match(orest, /^[ \t]*=[ \t]*[0-9]+/)) {
+			onum = substr(orest, RSTART, RLENGTH);
+			sub(/^[ \t]*=[ \t]*/, "", onum);
+			omcc_ver = onum sprintf(" (0x%02X)", onum + 0);
+		}
+	}
+
+	tolower($0) ~ /name="cwmp_productclass"/ && match($0, /value="([^"]+)"/) {
+		dev_name = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+	tolower($0) ~ /name="cwmp_hw_ver"/ && match($0, /value="([^"]+)"/) {
+		hw_ver = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+	tolower($0) ~ /name="oui"/ && match($0, /value="([^"]+)"/) {
+		oui = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+	tolower($0) ~ /name="mackey"/ && match($0, /value="([^"]+)"/) {
+		mackey = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+	tolower($0) ~ /vlan_manu_tag_vid/ && match($0, /value="([^"]+)"/) {
+		vlan_id = substr($0, RSTART + 7, RLENGTH - 8);
+	}
+
+	# ---- LAN packet counters. ----
+	# The columns are: interface, rx packets, rx errors, rx drops, tx packets,
+	# tx errors, tx drops. The previous code split a string with leading
+	# whitespace and relied on that producing an empty first element, which
+	# shifted every counter by one and put the interface name into rx_pkts.
+	# Leading and trailing whitespace is now removed and the first purely
+	# numeric column is located explicitly.
+	/>LAN</ { in_stats = 30; }
+	in_stats > 0 && /<tr>/ {
+		row = trim(clean);
+		n = split(row, nums, "[ \t]+");
+		start = 0;
+		for (i = 1; i <= n; i++) {
+			if (nums[i] ~ /^[0-9]+$/) { start = i; break; }
+		}
+		if (start > 0 && start + 5 <= n) {
+			rx_pkts = nums[start];   rx_err = nums[start + 1]; rx_drop = nums[start + 2];
+			tx_pkts = nums[start + 3]; tx_err = nums[start + 4]; tx_drop = nums[start + 5];
+			in_stats = 0;
+		}
+	}
+	in_stats > 0 { in_stats = in_stats - 1; }
+
+	# ---- PON extended packet statistics. ----
+	# Evaluated as an ordered chain so that a unicast, multicast or broadcast
+	# row is not also consumed by the generic "packets sent/received" rule.
+	{
+		lcs = tolower(clean);
+		if (lcs ~ /unicast packets sent/)          { sv = firstnum(clean); if (sv != "") pon_uni_sent = sv; }
+		else if (lcs ~ /unicast packets received/) { sv = firstnum(clean); if (sv != "") pon_uni_recv = sv; }
+		else if (lcs ~ /multicast packets sent/)   { sv = firstnum(clean); if (sv != "") pon_multi_sent = sv; }
+		else if (lcs ~ /multicast packets received/) { sv = firstnum(clean); if (sv != "") pon_multi_recv = sv; }
+		else if (lcs ~ /broadcast packets sent/)   { sv = firstnum(clean); if (sv != "") pon_broad_sent = sv; }
+		else if (lcs ~ /broadcast packets received/) { sv = firstnum(clean); if (sv != "") pon_broad_recv = sv; }
+		else if (lcs ~ /bytes sent/)               { sv = firstnum(clean); if (sv != "") pon_bytes_sent = sv; }
+		else if (lcs ~ /bytes received/)           { sv = firstnum(clean); if (sv != "") pon_bytes_recv = sv; }
+		else if (lcs ~ /packets sent/)             { sv = firstnum(clean); if (sv != "") pon_pkts_sent = sv; }
+		else if (lcs ~ /packets received/)         { sv = firstnum(clean); if (sv != "") pon_pkts_recv = sv; }
+		else if (lcs ~ /fec errors/)               { sv = firstnum(clean); if (sv != "") fec_errors = sv; }
+		else if (lcs ~ /hec errors/)               { sv = firstnum(clean); if (sv != "") hec_errors = sv; }
+	}
+
+	END {
+		# ---- Provenance of the optical class ----------------------------------
+		# Prefer what the optic states about itself. The VSOL helper can do this
+		# because its BOSA reports a vendor string of "ONU_B+_G"; nothing in the
+		# HSGQ web interface has been observed to carry an equivalent marker, and
+		# the HSGQ datasheet states compliance with ITU-T G.984.2 and Amendment 1
+		# without publishing a power budget class or any sensitivity or launch
+		# figures. So this normally resolves to "assumed", and is reported as such
+		# rather than presenting an assumed budget as a confirmed one.
+		class_source = "assumed";
+		if (optic_vendor ~ /C\+/ || optic_part ~ /C\+/) {
+			oclass = "cplus"; class_source = "hardware";
+			rx_sens = -32.0; rx_ovld = -12.0; tx_min = 0.5; tx_max = 5.0;
+			oc_cit = "ITU-T G.984.2 Amd.2 Class C+";
+		} else if (optic_vendor ~ /B\+/ || optic_part ~ /B\+/) {
+			oclass = "bplus"; class_source = "hardware";
+			rx_sens = -27.0; rx_ovld = -8.0; tx_min = 0.5; tx_max = 5.0;
+			oc_cit = "ITU-T G.984.2 Class B+";
+		}
+		# Keep the derived warning bands in step with any change made above.
+		rx_low_warn  = rx_sens + 1.0;
+		rx_high_warn = rx_ovld - 1.0;
+		tx_low_warn  = tx_min  + 0.5;
+		tx_high_warn = tx_max  - 0.5;
+
+		# Receiver assessment against the active optical class. Loss of Signal
+		# is asserted on BOTH sides of the usable receiver window: below the
+		# sensitivity floor there is no framing, and above the overload ceiling
+		# the receiver is saturated and there is likewise no framing.
+		if (!has_rx) {
+			rx_status = "unknown";
+			rx_msg = "Receiver power was not reported by the device";
+		} else if (rx_pwr <= -35.0) {
+			rx_status = "low_alarm";
+			rx_msg = "Loss of Signal - no signal / dark fibre";
+		} else if (rx_pwr < rx_sens) {
+			rx_status = "low_alarm";
+			rx_msg = sprintf("Loss of Signal - below the %.1f dBm receiver sensitivity floor (%s)", rx_sens, oc_cit);
+		} else if (rx_pwr > rx_ovld) {
+			rx_status = "high_alarm";
+			rx_msg = sprintf("Loss of Signal - receiver overload above %.1f dBm (%s)", rx_ovld, oc_cit);
+		} else if (rx_pwr < rx_low_warn) {
+			rx_status = "low_warn";
+			rx_msg = sprintf("Marginal low - within 1.0 dB of the %.1f dBm sensitivity floor", rx_sens);
+		} else if (rx_pwr > rx_high_warn) {
+			rx_status = "high_warn";
+			rx_msg = sprintf("Marginal high - within 1.0 dB of the %.1f dBm overload ceiling", rx_ovld);
+		} else {
+			rx_status = "normal";
+			rx_msg = sprintf("Within the receiver window for %s", oc_cit);
+		}
+
+		# Transmitter assessment.
+		if (tx_off) {
+			tx_status = "off";
+			tx_msg = "Transmitter laser off (device reported -inf)";
+		} else if (!has_tx) {
+			tx_status = "unknown";
+			tx_msg = "Transmit power was not reported by the device";
+		} else if (tx_pwr < tx_min) {
+			tx_status = "low_alarm";
+			tx_msg = sprintf("Below the %.1f dBm minimum launch power (%s)", tx_min, oc_cit);
+		} else if (tx_pwr > tx_max) {
+			tx_status = "high_alarm";
+			tx_msg = sprintf("Above the %.1f dBm maximum launch power (%s)", tx_max, oc_cit);
+		} else if (tx_pwr < tx_low_warn) {
+			tx_status = "low_warn";
+			tx_msg = "Marginal low launch power";
+		} else if (tx_pwr > tx_high_warn) {
+			tx_status = "high_warn";
+			tx_msg = "Marginal high launch power";
+		} else {
+			tx_status = "normal";
+			tx_msg = sprintf("Within the launch power window for %s", oc_cit);
+		}
+
+		# ONU state, ITU-T G.984.3 activation states.
+		if (onu_state == "O5") onu_desc = "O5 - Operational (synchronised and registered)";
+		else if (onu_state == "O4") onu_desc = "O4 - Ranging state";
+		else if (onu_state == "O3") onu_desc = "O3 - Serial number verification state";
+		else if (onu_state == "O2") onu_desc = "O2 - Standby state";
+		else if (onu_state == "O1") onu_desc = "O1 - Initialisation / standby state";
+		else onu_desc = "Unknown - ONU state was not reported by the device";
+
+		# Hardware alarms, tied to the active class rather than to a fixed
+		# figure. An unread receiver power reports Unknown, not Clear, because
+		# claiming the alarm is clear would be asserting something unmeasured.
+		if (!has_rx) {
+			alarm_los = "Unknown (receiver power not reported)";
+			alarm_sf  = "Unknown (receiver power not reported)";
+			alarm_sd  = "Unknown (receiver power not reported)";
+		} else {
+			if (rx_pwr <= -35.0)
+				alarm_los = "Active (LOS - no signal / dark fibre)";
+			else if (rx_pwr < rx_sens)
+				alarm_los = sprintf("Active (LOS - below %.1f dBm sensitivity)", rx_sens);
+			else if (rx_pwr > rx_ovld)
+				alarm_los = sprintf("Active (LOS - overload above %.1f dBm)", rx_ovld);
+			else
+				alarm_los = "Clear (Normal)";
+
+			alarm_sf = (rx_pwr < rx_sens && rx_pwr > -35.0) ? "Active (Signal Fail)" : "Clear (Normal)";
+
+			if (rx_pwr >= rx_sens && rx_pwr < rx_low_warn)
+				alarm_sd = "Active (Signal Degrade - near sensitivity floor)";
+			else if (rx_pwr <= rx_ovld && rx_pwr > rx_high_warn)
+				alarm_sd = "Active (Signal Degrade - near overload ceiling)";
+			else
+				alarm_sd = "Clear (Normal)";
+		}
+
+		if (onu_state == "--") alarm_lof = "Unknown (ONU state not reported)";
+		else alarm_lof = (onu_state != "O5") ? "Active (LOF Standby)" : "Clear (Normal)";
+
+		printf("{\n");
+		printf("  \"success\": true,\n");
+		printf("  \"connected\": true,\n");
+		printf("  \"host\": \"%s\",\n", jesc(host));
+		printf("  \"timestamp\": %s,\n", jint(ts));
+		printf("  \"optical_class\": \"%s\",\n", jesc(oclass));
+		# Provenance of that class. The HSGQ datasheet states compliance with
+		# ITU-T G.984.2 and Amendment 1 but publishes no power budget class and
+		# no sensitivity or launch figures, and the module reports none over its
+		# web interface. Unless the optic names a class in its own vendor or part
+		# string, the class here is an assumption and is labelled as one, so the
+		# dashboard never shows an assumed budget as a confirmed one.
+		printf("  \"optical_class_source\": \"%s\",\n", class_source);
+		printf("  \"ddm\": {\n");
+		printf("    \"rx_power_dbm\": %s,\n", jnum(rx_pwr, has_rx, "%.2f"));
+		printf("    \"tx_power_dbm\": %s,\n", jnum(tx_pwr, has_tx, "%.2f"));
+		printf("    \"temperature_c\": %s,\n", jnum(temp, has_temp, "%.2f"));
+		printf("    \"voltage_v\": %s,\n", jnum(volt, has_volt, "%.2f"));
+		printf("    \"bias_current_ma\": %s,\n", jnum(bias, has_bias, "%.2f"));
+		printf("    \"rx_status\": \"%s\",\n", jesc(rx_status));
+		printf("    \"rx_message\": \"%s\",\n", jesc(rx_msg));
+		printf("    \"tx_status\": \"%s\",\n", jesc(tx_status));
+		printf("    \"tx_message\": \"%s\",\n", jesc(tx_msg));
+		printf("    \"optical_budget_class\": \"%s\",\n", jesc(oc_cit));
+		printf("    \"fec_status\": \"%s\",\n", jesc(fec_status));
+		printf("    \"fec_errors\": %s,\n", jint(fec_errors));
+		printf("    \"hec_errors\": %s\n", jint(hec_errors));
+		printf("  },\n");
+		printf("  \"onu\": {\n");
+		printf("    \"state\": \"%s\",\n", jesc(onu_state));
+		printf("    \"onu_id\": \"%s\",\n", jesc(onu_id));
+		printf("    \"olt_vendor\": \"%s\",\n", jesc(olt_vendor));
+		printf("    \"registered_status\": \"%s\",\n", jesc(reg_stat));
+		printf("    \"mackey_status\": \"%s\",\n", jesc(mackey_stat));
+		printf("    \"description\": \"%s\",\n", jesc(onu_desc));
+		printf("    \"alarm_los\": \"%s\",\n", jesc(alarm_los));
+		printf("    \"alarm_lof\": \"%s\",\n", jesc(alarm_lof));
+		printf("    \"alarm_sf\": \"%s\",\n", jesc(alarm_sf));
+		printf("    \"alarm_sd\": \"%s\"\n", jesc(alarm_sd));
+		printf("  },\n");
+		printf("  \"device\": {\n");
+		printf("    \"device_name\": \"%s\",\n", jesc(dev_name));
+		printf("    \"vendor_id\": \"%s\",\n", jesc(vendor_id));
+		printf("    \"gpon_sn\": \"%s\",\n", jesc(gpon_sn));
+		printf("    \"uptime\": \"%s\",\n", jesc(uptime));
+		printf("    \"firmware\": \"%s\",\n", jesc(fw_ver));
+		printf("    \"hardware\": \"%s\",\n", jesc(hw_ver));
+		printf("    \"omci_sw1\": \"%s\",\n", jesc(omci_sw1));
+		printf("    \"omci_sw2\": \"%s\",\n", jesc(omci_sw2));
+		printf("    \"omcc_version\": \"%s\",\n", jesc(omcc_ver));
+		printf("    \"oui\": \"%s\",\n", jesc(oui));
+		printf("    \"cpu_usage\": \"%s\",\n", jesc(cpu_use));
+		printf("    \"mem_usage\": \"%s\",\n", jesc(mem_use));
+		printf("    \"mac\": \"%s\",\n", jesc(mac_addr));
+		printf("    \"mackey\": \"%s\",\n", jesc(mackey));
+		printf("    \"lan_status\": \"%s\",\n", jesc(lan_stat));
+		printf("    \"vlan_id\": \"%s\",\n", jesc(vlan_id));
+		printf("    \"lan_rx_pkts\": \"%s\",\n", jesc(rx_pkts));
+		printf("    \"lan_rx_err\": \"%s\",\n", jesc(rx_err));
+		printf("    \"lan_rx_drop\": \"%s\",\n", jesc(rx_drop));
+		printf("    \"lan_tx_pkts\": \"%s\",\n", jesc(tx_pkts));
+		printf("    \"lan_tx_err\": \"%s\",\n", jesc(tx_err));
+		printf("    \"lan_tx_drop\": \"%s\",\n", jesc(tx_drop));
+		printf("    \"pon_bytes_sent\": \"%s\",\n", jesc(pon_bytes_sent));
+		printf("    \"pon_bytes_recv\": \"%s\",\n", jesc(pon_bytes_recv));
+		printf("    \"pon_pkts_sent\": \"%s\",\n", jesc(pon_pkts_sent));
+		printf("    \"pon_pkts_recv\": \"%s\",\n", jesc(pon_pkts_recv));
+		printf("    \"pon_uni_sent\": \"%s\",\n", jesc(pon_uni_sent));
+		printf("    \"pon_uni_recv\": \"%s\",\n", jesc(pon_uni_recv));
+		printf("    \"pon_multi_sent\": \"%s\",\n", jesc(pon_multi_sent));
+		printf("    \"pon_multi_recv\": \"%s\",\n", jesc(pon_multi_recv));
+		printf("    \"pon_broad_sent\": \"%s\",\n", jesc(pon_broad_sent));
+		printf("    \"pon_broad_recv\": \"%s\"\n", jesc(pon_broad_recv));
+		printf("  },\n");
+		printf("  \"module\": {\n");
+		# What the optic itself reports, when it reports anything. Distinct from
+		# vendor_id/dev_name, which come from the OMCI configuration pages and
+		# describe the emulated ONU identity rather than the fitted transceiver.
+		printf("    \"optic_vendor\": %s,\n", optic_vendor == "" ? "null" : "\"" jesc(optic_vendor) "\"");
+		printf("    \"optic_part_number\": %s,\n", optic_part == "" ? "null" : "\"" jesc(optic_part) "\"");
+		printf("    \"vendor\": \"%s\",\n", jesc(vendor_id));
+		printf("    \"part_number\": \"%s\",\n", jesc(dev_name));
+		printf("    \"serial_number\": \"%s\",\n", jesc(gpon_sn));
+		printf("    \"mac_address\": \"%s\",\n", jesc(mac_addr));
+		printf("    \"wavelength_tx\": \"%d nm\",\n", wl_tx);
+		printf("    \"wavelength_rx\": \"%d nm\",\n", wl_rx);
+		# The datasheet states only "type: SC" and the module reports no connector
+		# field over DDM, and the stick ships in both UPC and APC variants -- so the
+		# polish is genuinely unknown and is not asserted here.
+		printf("    \"connector\": \"SC, single-mode optical connector\",\n");
+		printf("    \"calibration\": \"Internal (A2h map)\",\n");
+		printf("    \"compliance\": \"SFF-8472 / %s\"\n", jesc(oc_cit));
+		printf("  },\n");
+
+		# Threshold block. The dashboard populates its threshold table and
+		# derives its evaluator bands from exactly these numbers, so the table
+		# and the badges cannot contradict one another.
+		printf("  \"thresholds\": {\n");
+		printf("    \"citation\": \"%s\",\n", jesc(oc_cit));
+		printf("    \"rx_sensitivity_dbm\": %.2f,\n", rx_sens);
+		printf("    \"rx_overload_dbm\": %.2f,\n", rx_ovld);
+		printf("    \"rx_low_warn\": %.2f,\n", rx_low_warn);
+		printf("    \"rx_high_warn\": %.2f,\n", rx_high_warn);
+		printf("    \"tx_min_dbm\": %.2f,\n", tx_min);
+		printf("    \"tx_max_dbm\": %.2f,\n", tx_max);
+		printf("    \"tx_low_warn\": %.2f,\n", tx_low_warn);
+		printf("    \"tx_high_warn\": %.2f,\n", tx_high_warn);
+		printf("    \"wavelength_rx_nm\": %d,\n", wl_rx);
+		printf("    \"wavelength_tx_nm\": %d,\n", wl_tx);
+		printf("    \"sff_citation\": \"SFF-8472\",\n");
+		printf("    \"temp_low_alarm\": %.2f,\n", temp_low_alarm);
+		printf("    \"temp_low_warn\": %.2f,\n", temp_low_warn);
+		printf("    \"temp_high_warn\": %.2f,\n", temp_high_warn);
+		printf("    \"temp_high_alarm\": %.2f,\n", temp_high_alarm);
+		printf("    \"volt_low_alarm\": %.2f,\n", volt_low_alarm);
+		printf("    \"volt_low_warn\": %.2f,\n", volt_low_warn);
+		printf("    \"volt_high_warn\": %.2f,\n", volt_high_warn);
+		printf("    \"volt_high_alarm\": %.2f,\n", volt_high_alarm);
+		printf("    \"bias_low_alarm\": %.2f,\n", bias_low_alarm);
+		printf("    \"bias_low_warn\": %.2f,\n", bias_low_warn);
+		printf("    \"bias_high_warn\": %.2f,\n", bias_high_warn);
+		printf("    \"bias_high_alarm\": %.2f\n", bias_high_alarm);
+		printf("  }\n");
+		printf("}\n");
+	}'
 }
 
-test_connection() {
-	get_config
-	local RAW_HTML=$(http_query_all "$HOST" "$USER" "$PASS" "$TIMEOUT")
-	if echo "$RAW_HTML" | grep -qi 'PON Status'; then
-		cat <<EOF
-{
-	"success": true,
-	"connected": true,
-	"host": "$HOST",
-	"message": "Successfully authenticated and connected to HSGQ module at http://$HOST"
-}
-EOF
-	else
-		cat <<EOF
-{
-	"success": false,
-	"connected": false,
-	"host": "$HOST",
-	"message": "Unable to connect or authenticate to HSGQ module at http://$HOST"
-}
-EOF
-	fi
-}
+#
+# ------------------------------------------------------------- dispatcher ----
+#
 
 case "$1" in
 	list)
-		echo '{ "get_status": {}, "get_info": {}, "test_connection": {} }'
+		echo '{ "get_status": {}, "test_connection": { "host": "192.168.150.1", "username": "admin", "password": "string" } }'
 		;;
 	call)
 		case "$2" in
-			get_status|get_info)
-				fetch_telemetry
+			get_status)
+				get_config
+
+				if [ "$ENABLED" != "1" ]; then
+					fail_json "$HOST" "Module is disabled in configuration"
+					exit 0
+				fi
+
+				if ! require_curl; then
+					fail_json "$HOST" "$CURL_MISSING_MSG"
+					exit 0
+				fi
+
+				BASE=$(base_url "$PROTO" "$HOST" "$PORT")
+				AGE=$(cache_age)
+
+				# Fresh enough to serve as-is.
+				if [ "$AGE" -lt "$CACHE_TTL" ]; then
+					cat "$CACHE_FILE"
+					exit 0
+				fi
+
+				# Instant load: inside the bounded staleness window, answer from
+				# cache immediately and refresh behind the response. Detached from
+				# stdout, because leaving rpcd's descriptor open would make ubus
+				# wait for the child and reintroduce the very delay this removes.
+				# The non-blocking lock lets a refresh already in flight finish
+				# rather than starting a second scrape beside it.
+				if [ "$AGE" -lt "$MAX_STALE" ]; then
+					cat "$CACHE_FILE"
+					(
+						exec >/dev/null 2>&1 </dev/null
+						if command -v flock >/dev/null 2>&1; then
+							exec 9>"$LOCK_FILE"
+							flock -n 9 || exit 0
+						fi
+						R=$(http_query_all "$BASE")
+						if echo "$R" | grep -qi 'PON Status'; then
+							store_result "$(parse_html_single_pass "$R" "$HOST" "$OPTICAL_CLASS")"
+						fi
+					) &
+					exit 0
+				fi
+
+				RAW_DATA=$(http_query_all "$BASE")
+
+				if echo "$RAW_DATA" | grep -qi 'PON Status'; then
+					JSON_OUT=$(parse_html_single_pass "$RAW_DATA" "$HOST" "$OPTICAL_CLASS")
+					store_result "$JSON_OUT"
+					echo "$JSON_OUT"
+				else
+					# Control only reaches here when the cache was already older than
+					# MAX_STALE, so replaying it would present a module that has been
+					# unreachable for minutes as a healthy one. Report the failure.
+					fail_json "$HOST" "No response from $BASE - the stick is unreachable, or the credentials were rejected"
+				fi
 				;;
 			test_connection)
-				test_connection
-				;;
-			*)
-				echo '{"error": "Unknown method"}'
+				read -r input
+				get_config
+
+				THOST=$(echo "$input" | sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+				TUSER=$(echo "$input" | sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+				TPASS=$(echo "$input" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+				[ -n "$THOST" ] && HOST="$THOST"
+				[ -n "$TUSER" ] && USER="$TUSER"
+				[ -n "$TPASS" ] && PASS="$TPASS"
+
+				if ! require_curl; then
+					fail_json "$HOST" "$CURL_MISSING_MSG"
+					exit 0
+				fi
+
+				# http_login and http_get operate on the globals set above; point
+				# them at a separate jar so a test never disturbs the live session.
+				COOKIE_FILE="$TEST_COOKIE_FILE"
+				BASE=$(base_url "$PROTO" "$HOST" "$PORT")
+
+				http_login "${BASE}/boaform/admin/formLogin"
+				RES=$(http_get "${BASE}/status_pon.asp")
+				rm -f "$TEST_COOKIE_FILE"
+
+				if [ -z "$RES" ]; then
+					fail_json "$HOST" "No response from $BASE - check the address, protocol and port"
+				elif echo "$RES" | grep -qi 'PON Status'; then
+					printf '{"success": true, "connected": true, "host": "%s", "message": "Successfully connected to the HSGQ SFP stick at %s"}\n' \
+						"$(json_escape_sh "$HOST")" "$(json_escape_sh "$BASE")"
+				else
+					fail_json "$HOST" "Reached $BASE but the PON status page was not returned - the credentials were most likely rejected"
+				fi
 				;;
 		esac
-		;;
-	*)
-		echo '{"error": "Invalid action"}'
 		;;
 esac

@@ -7,58 +7,39 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-hsqg-ddm
+LUCI_NAME:=luci-app-hsqg-ddm
+LUCI_TITLE:=HSGQ SFP Stick DDM & Optical Diagnostics Monitor
+LUCI_DESCRIPTION:=LuCI hardware telemetry dashboard for HSGQ and Realtek-based SFP stick optical diagnostics.
+LUCI_DEPENDS:=+luci-base +curl
+
+# This package is pure shell, JavaScript and JSON -- it ships no compiled object
+# for the target -- so it is genuinely architecture independent. (The sibling
+# luci-app-vsol-ddm is NOT: it ships a target ELF helper, /usr/bin/vsol_query,
+# and therefore must stay architecture specific.)
+LUCI_PKGARCH:=all
+
 PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
-
 PKG_LICENSE:=Apache-2.0
-PKG_MAINTAINER:=OpenWrt Community
+PKG_LICENSE_FILES:=LICENSE
+PKG_MAINTAINER:=OpenWrt LuCI community
+PKG_URL:=https://github.com/AliLostInTheDark/luci-app-hsqg-ddm
 
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
+# ---------------------------------------------------------------------------
+# These three blocks MUST be defined before luci.mk is included.
+#
+# luci.mk calls BuildPackage itself, on its very last line. BuildPackage in turn
+# expands include/package-pack.mk, which reads the conffiles list immediately
+# ("KEEP_$(1):=$(strip $(call Package/$(1)/conffiles))") and gates the maintainer
+# scripts on an immediate "ifdef Package/$(1)/<script>". Anything defined after
+# the include is therefore evaluated too late and is silently dropped -- the
+# package would build cleanly and simply lose /etc/config/hsqg_ddm on upgrade.
+# ---------------------------------------------------------------------------
 
-include $(INCLUDE_DIR)/package.mk
-
-define Package/luci-app-hsqg-ddm
-  SECTION:=luci
-  CATEGORY:=LuCI
-  SUBMENU:=3. Applications
-  TITLE:=HSGQ SFP Stick DDM & Optical Diagnostics Monitor
-  DEPENDS:=+luci-base +curl
-  PKGARCH:=all
-endef
-
-define Package/luci-app-hsqg-ddm/description
-  LuCI hardware telemetry dashboard for HSGQ and Realtek-based SFP stick optical diagnostics.
-endef
-
+# Retained across package upgrade. Sysupgrade retention is handled separately by
+# /lib/upgrade/keep.d/luci-app-hsqg-ddm, shipped under root/.
 define Package/luci-app-hsqg-ddm/conffiles
 /etc/config/hsqg_ddm
-endef
-
-define Build/Prepare
-	mkdir -p $(PKG_BUILD_DIR)
-endef
-
-define Build/Compile
-endef
-
-define Package/luci-app-hsqg-ddm/install
-	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/hsqg_ddm
-	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/hsqg_ddm/* $(1)/www/luci-static/resources/view/hsqg_ddm/
-
-	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_CONF) ./root/etc/config/hsqg_ddm $(1)/etc/config/hsqg_ddm
-
-	$(INSTALL_DIR) $(1)/etc/uci-defaults
-	$(INSTALL_BIN) ./root/etc/uci-defaults/* $(1)/etc/uci-defaults/ 2>/dev/null || true
-
-	$(INSTALL_DIR) $(1)/usr/libexec/rpcd
-	$(INSTALL_BIN) ./root/usr/libexec/rpcd/* $(1)/usr/libexec/rpcd/
-
-	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
-	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/* $(1)/usr/share/luci/menu.d/
-
-	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
-	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/* $(1)/usr/share/rpcd/acl.d/
 endef
 
 define Package/luci-app-hsqg-ddm/postinst
@@ -82,4 +63,9 @@ define Package/luci-app-hsqg-ddm/postrm
 exit 0
 endef
 
-$(eval $(call BuildPackage,luci-app-hsqg-ddm))
+# luci.mk installs htdocs/ under /www and the whole of root/ under / with
+# "cp -pR", preserving the source file modes -- so root/usr/libexec/rpcd/hsqg_ddm
+# and root/etc/uci-defaults/80_luci-app-hsqg-ddm must stay mode 0755 in git.
+include $(TOPDIR)/feeds/luci/luci.mk
+
+# call BuildPackage - OpenWrt buildroot signature
