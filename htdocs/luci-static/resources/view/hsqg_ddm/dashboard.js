@@ -879,29 +879,45 @@ return view.extend({
 			});
 		};
 
-		var omciLoaded = false;
-		var loadOmci = function(force) {
-			if (omciLoaded && !force)
-				return;
-			omciLoaded = true;
+		var omciDataCache = null;
+		var fiberWasDown = true;
+		var omciLoading = false;
 
+		var loadOmci = function(force) {
+			if (omciLoading)
+				return;
+			if (omciDataCache && !force) {
+				renderOmciCards(omciDataCache, false);
+				return;
+			}
+
+			omciLoading = true;
 			omciBtn.disabled = true;
 			setNote(_('Reading OMCI managed entities from the HSGQ SFP stick...'));
 
 			callGetOmci().then(function(res) {
 				res = res || {};
-				renderOmciCards(res, false);
-				setNote(res.success ? '' : (res.error || _('Could not read OMCI data from the stick.')),
-				        res.success ? '' : '#e53935');
+				if (res.success && res.me && Object.keys(res.me).length > 0) {
+					omciDataCache = res;
+					renderOmciCards(res, false);
+					setNote('');
+				} else {
+					omciDataCache = null;
+					renderOmciCards(null, true);
+					setNote(res.error || _('Could not read OMCI data from the stick.'), '#e53935');
+				}
 				omciBtn.disabled = false;
+				omciLoading = false;
 			}).catch(function(e) {
+				omciDataCache = null;
+				renderOmciCards(null, true);
 				setNote(_('OMCI read failed: ') + (e && e.message ? e.message : String(e)), '#e53935');
 				omciBtn.disabled = false;
+				omciLoading = false;
 			});
 		};
 
 		renderOmciCards(null, true);
-		loadOmci(false);
 
 		/* Text setter that always writes, so a stale reading can never be left on screen. */
 		var setTxt = function(id, val, color) {
@@ -1371,6 +1387,26 @@ return view.extend({
 			setStatusBadge('th-temp-status', tempQ);
 			setStatusBadge('th-volt-status', voltQ);
 			setStatusBadge('th-bias-status', biasQ);
+
+			/* 6. OMCI Managed Entities Lifecycle:
+			 * - When fiber is in LOS / disconnected: blank out OMCI cards immediately.
+			 * - When fiber returns to operational state: fetch OMCI once and populate.
+			 * - While healthy: do not query OMCI on polling cycles.
+			 */
+			var isFiberDown = !ok || isNaN(rx) || (rx <= -35.0) || (onu.state && onu.state !== 'O5');
+			if (isFiberDown) {
+				if (!fiberWasDown) {
+					fiberWasDown = true;
+					omciDataCache = null;
+					renderOmciCards(null, true);
+					setNote(_('Optical link is inactive / LOS. OMCI data is cleared until fibre link synchronises (O5).'), '#ff5252');
+				}
+			} else {
+				if (fiberWasDown || !omciDataCache) {
+					fiberWasDown = false;
+					loadOmci(true);
+				}
+			}
 		};
 
 		// Initial render populate

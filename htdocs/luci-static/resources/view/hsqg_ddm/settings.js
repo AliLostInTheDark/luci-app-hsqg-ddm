@@ -66,14 +66,6 @@ return view.extend({
 		o.value('imperial', _('Imperial System (°F, µW)'));
 		o.default = 'dual';
 
-		o = s.option(form.ListValue, 'optical_class', _('Optical Class'),
-			_('Transceiver optical class. This selects the receiver sensitivity and overload limits used as the Loss of Signal assert points, and the transmit launch power window. Leave at GPON Class B+ unless your SFP stick is documented otherwise.'));
-		o.value('bplus', _('GPON Class B+ (ITU-T G.984.2)'));
-		o.value('cplus', _('GPON Class C+ (ITU-T G.984.2 Amd.2)'));
-		o.value('epon_px20', _('EPON 1000BASE-PX20-U (IEEE 802.3ah)'));
-		o.default = 'bplus';
-		o.rmempty = false;
-
 		o = s.option(form.ListValue, 'poll_interval', _('Polling Interval'),
 			_('Frequency of live DDM telemetry collection.'));
 		o.value('2', _('2 Seconds (High Resolution)'));
