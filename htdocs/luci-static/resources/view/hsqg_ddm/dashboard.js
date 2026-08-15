@@ -139,7 +139,8 @@ return view.extend({
 		return Promise.all([
 			uci.load('hsqg_ddm'),
 			callGetStatus(),
-			L.resolveDefault(callGetHistory(), {})
+			L.resolveDefault(callGetHistory(), {}),
+			L.resolveDefault(callGetOmci(), {})
 		]);
 	},
 
@@ -147,6 +148,7 @@ return view.extend({
 		var self = this;
 		var initialStatus = data[1] || {};
 		var initialHistory = data[2] || {};
+		var initialOmci = data[3] || {};
 
 		/* Polling interval is clamped to a sane 1..60 s window. */
 		var pollInterval = parseInt(uci.get('hsqg_ddm', 'main', 'poll_interval'), 10);
@@ -976,8 +978,8 @@ return view.extend({
 			});
 		};
 
-		var omciDataCache = null;
-		var fiberWasDown = true;
+		var omciDataCache = (initialOmci && initialOmci.me && Object.keys(initialOmci.me).length > 0) ? initialOmci : null;
+		var fiberWasDown = false;
 		var omciLoading = false;
 
 		var loadOmci = function(force) {
@@ -999,22 +1001,28 @@ return view.extend({
 					renderOmciCards(res, false);
 					setNote('');
 				} else {
-					omciDataCache = null;
-					renderOmciCards(null, true);
-					setNote(res.error || _('Could not read OMCI data from the stick.'), '#e53935');
+					if (!omciDataCache) {
+						renderOmciCards(null, true);
+						setNote(res.error || _('Could not read OMCI data from the stick.'), '#e53935');
+					}
 				}
 				omciBtn.disabled = false;
 				omciLoading = false;
 			}).catch(function(e) {
-				omciDataCache = null;
-				renderOmciCards(null, true);
-				setNote(_('OMCI read failed: ') + (e && e.message ? e.message : String(e)), '#e53935');
+				if (!omciDataCache) {
+					renderOmciCards(null, true);
+					setNote(_('OMCI read failed: ') + (e && e.message ? e.message : String(e)), '#e53935');
+				}
 				omciBtn.disabled = false;
 				omciLoading = false;
 			});
 		};
 
-		renderOmciCards(null, true);
+		if (omciDataCache) {
+			renderOmciCards(omciDataCache, false);
+		} else {
+			loadOmci(false);
+		}
 
 		/* ---------------- Time-series Canvas Renderer (Grafana Style) --- */
 		var renderChart = function(chartObj, dataHistory, thLo, thHi) {
@@ -1781,24 +1789,9 @@ return view.extend({
 			setStatusBadge('th-volt-status', voltQ);
 			setStatusBadge('th-bias-status', biasQ);
 
-			/* 6. OMCI Managed Entities Lifecycle:
-			 * - When fiber is in LOS / disconnected: blank out OMCI cards immediately.
-			 * - When fiber returns to operational state: fetch OMCI once and populate.
-			 * - While healthy: do not query OMCI on polling cycles.
-			 */
-			var isFiberDown = !ok || isNaN(rx) || (rx <= -35.0) || (onu.state && onu.state !== 'O5');
-			if (isFiberDown) {
-				if (!fiberWasDown) {
-					fiberWasDown = true;
-					omciDataCache = null;
-					renderOmciCards(null, true);
-					setNote(_('Optical link is inactive / LOS. OMCI data is cleared until fibre link synchronises (O5).'), '#ff5252');
-				}
-			} else {
-				if (fiberWasDown || !omciDataCache) {
-					fiberWasDown = false;
-					loadOmci(true);
-				}
+			/* 6. OMCI Managed Entities Lifecycle */
+			if (!omciDataCache && !omciLoading) {
+				loadOmci(false);
 			}
 		};
 
