@@ -693,7 +693,7 @@ return view.extend({
 		}
 
 		var renderAllCharts = function(statusData) {
-			var th = (statusData && statusData.ddm && statusData.ddm.thresholds) ? statusData.ddm.thresholds : SFF_THRESHOLDS;
+			var th = buildThresholds(statusData);
 			renderChart(rxChart, chartHistories.rx, th.rx_low_alarm, th.rx_high_alarm);
 			renderChart(txChart, chartHistories.tx, th.tx_low_alarm, th.tx_high_alarm);
 			renderChart(tempChart, chartHistories.temp, th.temp_low_alarm, th.temp_high_alarm);
