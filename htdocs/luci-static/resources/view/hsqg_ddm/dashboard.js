@@ -647,7 +647,7 @@ return view.extend({
 
 		// 1. Top Row: 3 Primary Dials (RX, TX, Operating Temperature)
 		var rxDial = createDial('rx', _('Laser Rx (1490 nm)'), SFF_DESCRIPTORS.rx);
-		var txDial = createDial('Laser Tx (1310 nm)', _('Laser Tx (1310 nm)'), SFF_DESCRIPTORS.tx);
+		var txDial = createDial('tx', _('Laser Tx (1310 nm)'), SFF_DESCRIPTORS.tx);
 		var tempDial = createDial('temp', _('SFP SoC Temperature'), SFF_DESCRIPTORS.temp);
 
 		container.appendChild(rxDial.node);
@@ -1037,10 +1037,10 @@ return view.extend({
 			ctx.scale(dpr, dpr);
 			ctx.clearRect(0, 0, width, height);
 
-			var padL = 44;
-			var padR = 16;
+			var padL = (width < 480) ? 46 : 52;
+			var padR = (width < 480) ? 14 : 18;
 			var padT = 14;
-			var padB = 24;
+			var padB = 26;
 			var plotW = width - padL - padR;
 			var plotH = height - padT - padB;
 
@@ -1152,10 +1152,10 @@ return view.extend({
 				ctx.stroke();
 			}
 
-			// Draw Grid lines & Y labels
+			// Draw Horizontal Grid lines & Y labels
 			ctx.strokeStyle = 'rgba(128, 128, 128, 0.12)';
 			ctx.lineWidth = 1;
-			ctx.fillStyle = 'rgba(128, 128, 128, 0.65)';
+			ctx.fillStyle = 'rgba(128, 128, 128, 0.70)';
 			ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 			ctx.textAlign = 'right';
 
@@ -1170,22 +1170,39 @@ return view.extend({
 				ctx.fillText(gVal.toFixed(1), padL - 5, gy + 3);
 			}
 
-			// Draw X-axis 24-Hour Timeline Marks (-24h, -18h, -12h, -6h, Now) with zero overlap on mobile
-			ctx.textAlign = 'center';
-			var xSteps = (plotW < 360) ? 2 : 4;
-			for (var xs = 0; xs <= xSteps; xs++) {
-				var xx = padL + (plotW * xs / xSteps);
-				var curT = minTime + (WINDOW_MS * xs / xSteps);
+			// Draw 24 Vertical Lines (every 1 hour passed) across the 24-hour timeline
+			ctx.lineWidth = 1;
+			for (var h = 0; h <= 24; h++) {
+				var hx = padL + (plotW * h / 24);
+				ctx.strokeStyle = 'rgba(128, 128, 128, 0.10)';
+				ctx.beginPath();
+				ctx.moveTo(hx, padT);
+				ctx.lineTo(hx, padT + plotH);
+				ctx.stroke();
+			}
+
+			// Draw X-axis Hour Values (00:00 to 24:00 timeline) with zero truncation
+			var labelIntervalHours = 2; // default: every 2 hours
+			if (plotW < 520) labelIntervalHours = 6;      // mobile: every 6 hours
+			else if (plotW < 750) labelIntervalHours = 4;  // tablet: every 4 hours
+
+			for (var hr = 0; hr <= 24; hr += labelIntervalHours) {
+				var lx = padL + (plotW * hr / 24);
+				var curT = minTime + (hr * 3600 * 1000);
 				var dObj = new Date(curT);
 				var hh = ('0' + dObj.getHours()).slice(-2);
 				var mm = ('0' + dObj.getMinutes()).slice(-2);
-				var lbl;
-				if (plotW < 360) {
-					lbl = (xs === 0 ? '-24h ' : (xs === xSteps ? _('Now ') : '-12h ')) + '(' + hh + ':' + mm + ')';
+				var timeLabel = hh + ':' + mm;
+
+				if (hr === 0) {
+					ctx.textAlign = 'left';
+				} else if (hr === 24) {
+					ctx.textAlign = 'right';
+					timeLabel = _('Now') + ' (' + hh + ':' + mm + ')';
 				} else {
-					lbl = (xs === 0 ? _('24h ago') : (xs === xSteps ? _('Now') : (24 - xs * 6) + 'h ago')) + ' (' + hh + ':' + mm + ')';
+					ctx.textAlign = 'center';
 				}
-				ctx.fillText(lbl, xx, padT + plotH + 16);
+				ctx.fillText(timeLabel, lx, padT + plotH + 16);
 			}
 
 			// Map all points to 24-hour canvas coordinates with state evaluation
@@ -1248,14 +1265,15 @@ return view.extend({
 				ctx.stroke();
 			}
 
-			// 3. Draw small Grafana point dots at 30-minute intervals (and endpoints)
+			// 3. Draw small Grafana point dots at 15-minute intervals (4 per hour) and at the latest endpoint
 			var lastDotTime = -Infinity;
+			var FIFTEEN_MIN_MS = 15 * 60 * 1000;
 			for (var d = 0; d < points.length; d++) {
 				var pt = points[d];
 				if (pt.offline) continue;
 				var ptTime = pt.time || (minTime + ((pt.x - padL) / plotW) * WINDOW_MS);
-				var is30m = (ptTime - lastDotTime >= 30 * 60 * 1000 - 15000) || (d === points.length - 1) || (d === 0);
-				if (is30m) {
+				var is15m = (ptTime - lastDotTime >= FIFTEEN_MIN_MS - 15000) || (d === points.length - 1) || (d === 0);
+				if (is15m) {
 					lastDotTime = ptTime;
 					ctx.beginPath();
 					ctx.setLineDash([]);
