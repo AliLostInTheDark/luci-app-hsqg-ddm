@@ -7,7 +7,6 @@
 					"get_status",
 					"get_omci",
 					"get_history",
-					"get_info",
 					"test_connection"
 				]
 			},
