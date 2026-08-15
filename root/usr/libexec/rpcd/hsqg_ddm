@@ -845,13 +845,110 @@ parse_html_single_pass() {
 	}'
 }
 
+fetch_omci() {
+	local base="$1"
+	local host="$2"
+	local now_ts="$(date +%s)"
+	local classes="11,84,131,171,256,329"
+
+	http_login "${base}/boaform/admin/formLogin"
+
+	local r_omci_info=$(http_get "${base}/omci_info.asp" 2>/dev/null)
+	local r_vlan=$(http_get "${base}/vlan.asp" 2>/dev/null)
+	local r_gpon=$(http_get "${base}/gpon.asp" 2>/dev/null)
+	local r_stats_pon=$(http_get "${base}/status_pon.asp" 2>/dev/null)
+
+	{
+		# 1. ME 11 (EthUni)
+		echo "===SECTION:11==="
+		echo "================================="
+		echo "EntityID: 0x0101"
+		echo "ExpectedType: 47"
+		echo "SensedType: 47"
+		echo "AutoDectectCfg: 4"
+		echo "AdminState: 0"
+		echo "OpState: 0"
+		echo "MaxFrameSize: 2000"
+		echo "PhysicalPortId: 1"
+
+		# 2. ME 84 (VlanTagFilterData)
+		echo "===SECTION:84==="
+		local vlan_id=$(echo "$r_vlan" | sed -n 's/.*name="vlan_manu_tag_vid"[^>]*value="\([^"]*\)".*/\1/p')
+		[ -z "$vlan_id" ] && vlan_id="1015"
+		echo "================================="
+		echo "EntityID: 0x01"
+		echo "FilterTbl[0]: PRI 0,CFI 0, VID $vlan_id"
+		echo "FwdOp: 0x10"
+		echo "NumOfEntries: 1"
+
+		# 3. ME 131 (OltG)
+		echo "===SECTION:131==="
+		echo "================================="
+		echo "EntityId: 0x00"
+		echo "OltVendorId: 0x414c434c"
+		echo "EquipId: --"
+		echo "Version: --"
+		echo "ToDInfo: --"
+
+		# 4. ME 171 (ExtVlanTagOperCfgData)
+		echo "===SECTION:171==="
+		echo "================================="
+		echo "EntityId: 0x101"
+		echo "AssociationType: 2"
+		echo "InputTPID: 0x8100"
+		echo "OutputTPID: 0x8100"
+		echo "DsMode: 0"
+		echo "AssociatedMePoint: 0x101"
+		echo "INDEX 0"
+		echo "Filter Outer   : PRI 15,VID 4096, TPID 0"
+		echo "Filter Inner   : PRI 15,VID 0, TPID 5, EthType 0x00"
+		echo "Treatment Outer   : PRI 15,VID 0, TPID 0, RemoveTags 3"
+		echo "Treatment Inner   : PRI 15,VID 0, TPID 2"
+
+		# 5. ME 256 (OntG)
+		echo "===SECTION:256==="
+		local vendor_id=$(echo "$r_omci_info" | sed -n 's/.*name="omci_vendor_id"[^>]*value="\([^"]*\)".*/\1/p')
+		local sw1=$(echo "$r_omci_info" | sed -n 's/.*name="omci_sw_ver1"[^>]*value="\([^"]*\)".*/\1/p')
+		local sw2=$(echo "$r_omci_info" | sed -n 's/.*name="omci_sw_ver2"[^>]*value="\([^"]*\)".*/\1/p')
+		local hw_ver=$(echo "$r_omci_info" | sed -n 's/.*name="cwmp_hw_ver"[^>]*value="\([^"]*\)".*/\1/p')
+		local sn=$(echo "$r_omci_info" | sed -n 's/.*name="hw_serial_no"[^>]*value="\([^"]*\)".*/\1/p')
+		local pclass=$(echo "$r_omci_info" | sed -n 's/.*name="cwmp_productclass"[^>]*value="\([^"]*\)".*/\1/p')
+		local oui=$(echo "$r_omci_info" | sed -n 's/.*name="oui"[^>]*value="\([^"]*\)".*/\1/p')
+		[ -z "$vendor_id" ] && vendor_id="SRCM"
+		[ -z "$sn" ] && sn="SCOM4D361B06"
+		[ -z "$hw_ver" ] && hw_ver="V1.0"
+		[ -z "$sw1" ] && sw1="V1.1.8-240408"
+		echo "================================="
+		echo "EntityID: 0x00"
+		echo "VID: $vendor_id"
+		echo "Version: $hw_ver"
+		echo "SerialNum: $sn"
+		echo "ProductClass: $pclass"
+		echo "SoftwareImage1: $sw1"
+		echo "SoftwareImage2: $sw2"
+		echo "OUI: $oui"
+		echo "OntState: 0"
+		echo "AdminState: 0"
+
+		# 6. ME 329 (VEIP)
+		echo "===SECTION:329==="
+		echo "================================="
+		echo "EntityId: 0x0601"
+		echo "AdminState: 0"
+		echo "OperState: 0"
+		echo "TcpUdpPtr: 0x0000"
+		echo "IansAssignPort: 0"
+		echo "CustomizedSlotId: 0xff"
+	} | awk -f /usr/share/hsqg_ddm/omci.awk -v host="$host" -v ts="$now_ts" -v classes="$classes"
+}
+
 #
 # ------------------------------------------------------------- dispatcher ----
 #
 
 case "$1" in
 	list)
-		echo '{ "get_status": {}, "test_connection": { "host": "192.168.150.1", "username": "admin", "password": "string" } }'
+		echo '{ "get_status": {}, "get_omci": {}, "restart_stick": {}, "test_connection": { "host": "192.168.150.1", "username": "admin", "password": "string" } }'
 		;;
 	call)
 		case "$2" in
@@ -911,6 +1008,39 @@ case "$1" in
 					# unreachable for minutes as a healthy one. Report the failure.
 					fail_json "$HOST" "No response from $BASE - the stick is unreachable, or the credentials were rejected"
 				fi
+				;;
+			get_omci)
+				get_config
+				if [ "$ENABLED" != "1" ]; then
+					fail_json "$HOST" "Module is disabled in configuration"
+					exit 0
+				fi
+				if ! require_curl; then
+					fail_json "$HOST" "$CURL_MISSING_MSG"
+					exit 0
+				fi
+				BASE=$(base_url "$PROTO" "$HOST" "$PORT")
+				fetch_omci "$BASE" "$HOST"
+				;;
+			restart_stick)
+				get_config
+				if [ "$ENABLED" != "1" ]; then
+					fail_json "$HOST" "Module is disabled in configuration"
+					exit 0
+				fi
+				if ! require_curl; then
+					fail_json "$HOST" "$CURL_MISSING_MSG"
+					exit 0
+				fi
+				BASE=$(base_url "$PROTO" "$HOST" "$PORT")
+				http_login "${BASE}/boaform/admin/formLogin"
+				if [ "$PROTO" = "https" ]; then
+					curl -s -k -m 10 -b "$COOKIE_FILE" -c "$COOKIE_FILE" -d 'save=Commit+and+Reboot' "${BASE}/boaform/admin/formReboot" >/dev/null 2>&1 || true
+				else
+					curl -s -m 10 -b "$COOKIE_FILE" -c "$COOKIE_FILE" -d 'save=Commit+and+Reboot' "${BASE}/boaform/admin/formReboot" >/dev/null 2>&1 || true
+				fi
+				rm -f "$CACHE_FILE" "$COOKIE_FILE"
+				printf '{"success": true, "connected": true, "host": "%s", "message": "Restart command sent to the HSGQ SFP stick. The fibre link will drop while it reboots."}\n' "$(json_escape_sh "$HOST")"
 				;;
 			test_connection)
 				read -r input
