@@ -1270,7 +1270,6 @@ return view.extend({
 					ctx.textAlign = 'left';
 				} else if (ls === numVerticalLines) {
 					ctx.textAlign = 'right';
-					timeLabel = _('Now') + ' (' + hh + ':' + mm + ')';
 				} else {
 					ctx.textAlign = 'center';
 				}
