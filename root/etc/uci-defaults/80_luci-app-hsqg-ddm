@@ -39,4 +39,9 @@ uci -q commit ${CFG}
 # Flush LuCI and rpcd caches so the new view and ACL are picked up.
 rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/hsqg_ddm_cache.json /tmp/luci-sessions/*
 
+if [ -f /etc/init.d/hsqg_ddm ]; then
+	/etc/init.d/hsqg_ddm enable >/dev/null 2>&1 || true
+	/etc/init.d/hsqg_ddm restart >/dev/null 2>&1 || true
+fi
+
 exit 0

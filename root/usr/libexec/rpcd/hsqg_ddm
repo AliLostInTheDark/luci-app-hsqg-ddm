@@ -42,6 +42,62 @@ cache_age() {
 	echo $(( $(date +%s) - _mt ))
 }
 
+HISTORY_FILE="/tmp/hsqg_ddm_history.json"
+MAX_HISTORY_ENTRIES=1440
+
+record_history_sample() {
+	[ -n "$1" ] || return 0
+	_now=$(date +%s)
+	if [ -f "$HISTORY_FILE" ]; then
+		_last_ts=$(tail -n 1 "$HISTORY_FILE" 2>/dev/null | sed -n 's/.*\[\([0-9]*\),.*/\1/p')
+		if [ -n "$_last_ts" ] && [ $(( _now - _last_ts )) -lt 55 ]; then
+			return 0
+		fi
+	fi
+
+	printf '%s\n' "$1" | awk -v now="$_now" -v hist="$HISTORY_FILE" '
+	BEGIN { rx="null"; tx="null"; temp="null"; bias="null"; ok=0 }
+	/"success"[ \t]*:[ \t]*true/ { ok=1 }
+	/"rx_power_dbm"[ \t]*:[ \t]*(-?[0-9.]+)/ {
+		match($0, /"rx_power_dbm"[ \t]*:[ \t]*(-?[0-9.]+)/, m); rx=sprintf("%.2f", m[1])
+	}
+	/"tx_power_dbm"[ \t]*:[ \t]*(-?[0-9.]+)/ {
+		match($0, /"tx_power_dbm"[ \t]*:[ \t]*(-?[0-9.]+)/, m); tx=sprintf("%.2f", m[1])
+	}
+	/"temperature_c"[ \t]*:[ \t]*(-?[0-9.]+)/ {
+		match($0, /"temperature_c"[ \t]*:[ \t]*(-?[0-9.]+)/, m); temp=sprintf("%.2f", m[1])
+	}
+	/"bias_current_ma"[ \t]*:[ \t]*(-?[0-9.]+)/ {
+		match($0, /"bias_current_ma"[ \t]*:[ \t]*(-?[0-9.]+)/, m); bias=sprintf("%.2f", m[1])
+	}
+	END {
+		if (ok) {
+			print "[" now "," rx "," tx "," temp "," bias "]" >> hist
+		}
+	}'
+
+	_lines=$(wc -l < "$HISTORY_FILE" 2>/dev/null || echo 0)
+	if [ "$_lines" -gt "$MAX_HISTORY_ENTRIES" ]; then
+		_trim=$(( _lines - MAX_HISTORY_ENTRIES ))
+		sed -i "1,${_trim}d" "$HISTORY_FILE" 2>/dev/null
+	fi
+}
+
+get_history() {
+	printf '{"success": true, "timestamp": %s, "history": [' "$(date +%s)"
+	if [ -f "$HISTORY_FILE" ]; then
+		awk 'NR>1{printf ","} {printf "%s", $0}' "$HISTORY_FILE"
+	fi
+	printf ']}\n'
+}
+
+run_daemon() {
+	while true; do
+		fetch_telemetry >/dev/null 2>&1
+		sleep 60
+	done
+}
+
 # Atomic write, so a concurrent reader never sees a half-written cache file.
 store_result() {
 	case "$1" in
@@ -49,6 +105,7 @@ store_result() {
 			printf '%s' "$1" > "${CACHE_FILE}.$$" 2>/dev/null &&
 				mv "${CACHE_FILE}.$$" "$CACHE_FILE" 2>/dev/null
 			rm -f "${CACHE_FILE}.$$" 2>/dev/null
+			record_history_sample "$1"
 			return 0
 			;;
 	esac
@@ -948,10 +1005,16 @@ fetch_omci() {
 
 case "$1" in
 	list)
-		echo '{ "get_status": {}, "get_omci": {}, "restart_stick": {}, "test_connection": { "host": "192.168.150.1", "username": "admin", "password": "string" } }'
+		echo '{ "get_status": {}, "get_history": {}, "get_omci": {}, "restart_stick": {}, "test_connection": { "host": "192.168.150.1", "username": "admin", "password": "string" } }'
+		;;
+	daemon)
+		run_daemon
 		;;
 	call)
 		case "$2" in
+			get_history)
+				get_history
+				;;
 			get_status)
 				get_config
 
