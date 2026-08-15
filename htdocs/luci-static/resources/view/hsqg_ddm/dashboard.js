@@ -527,18 +527,8 @@ return view.extend({
 		};
 
 		var getTxQuality = function(tx, th, txStatus) {
-			/* The stick reports -inf when the laser is off, which the backend
-			 * relays as a null power plus tx_status "off". That is a definite
-			 * state the device told us, not an absence of information, so it must
-			 * not be flattened into "Unknown". */
-			if (txStatus === 'off') {
+			if (txStatus === 'off' || tx === null || tx === 0 || (typeof tx === 'number' && tx <= LASER_OFF_DBM)) {
 				return grade('off', _('LASER OFF'), _('Laser Off'));
-			}
-			if (tx === null) {
-				return grade('off', _('UNKNOWN'), _('Unknown'));
-			}
-			if (tx <= LASER_OFF_DBM) {
-				return grade('off', _('LASER INACTIVE'), _('Laser Inactive'));
 			}
 			if (tx < th.tx_low_alarm) {
 				return grade('alarm', _('LOW TX POWER (ALARM)'), _('Low TX Alarm'));
@@ -1125,14 +1115,18 @@ return view.extend({
 			});
 
 			if (!validSamples.length) {
-				if (curEl) { curEl.textContent = '--'; curEl.style.color = '#9e9e9e'; }
+				var isTxChart = (chartObj.key === 'tx');
+				if (curEl) {
+					curEl.textContent = isTxChart ? _('Laser Off') : '--';
+					curEl.style.color = '#757575';
+				}
 				if (minEl) minEl.textContent = 'Min: --';
 				if (maxEl) maxEl.textContent = 'Max: --';
 				if (avgEl) avgEl.textContent = 'Avg: --';
 				ctx.fillStyle = 'rgba(128,128,128,0.4)';
 				ctx.font = '12px system-ui, sans-serif';
 				ctx.textAlign = 'center';
-				ctx.fillText(_('Waiting for telemetry samples...'), padL + plotW / 2, padT + plotH / 2);
+				ctx.fillText(isTxChart ? _('Laser Off (Transmitter Inactive)') : _('Waiting for telemetry samples...'), padL + plotW / 2, padT + plotH / 2);
 				ctx.restore();
 				return;
 			}
@@ -1167,8 +1161,13 @@ return view.extend({
 			var headerColor = isLatestAlarm ? '#ff5252' : (isLatestWarn ? '#ffb300' : chartObj.color);
 
 			if (curEl) {
-				curEl.textContent = latest.toFixed(2) + ' ' + chartObj.unit;
-				curEl.style.color = headerColor;
+				if (chartObj.key === 'tx' && (latest === 0 || latest <= LASER_OFF_DBM)) {
+					curEl.textContent = _('Laser Off');
+					curEl.style.color = '#757575';
+				} else {
+					curEl.textContent = latest.toFixed(2) + ' ' + chartObj.unit;
+					curEl.style.color = headerColor;
+				}
 			}
 			if (minEl) minEl.textContent = 'Min: ' + minVal.toFixed(1);
 			if (maxEl) maxEl.textContent = 'Max: ' + maxVal.toFixed(1);
@@ -1514,13 +1513,12 @@ return view.extend({
 			var txProg = document.getElementById('dial-prog-tx');
 			var txStats = document.getElementById('stats-tx');
 
-			var txDash = ((tx === null || tx <= LASER_OFF_DBM) ? 0 : arcPct(tx, th.tx_low_alarm - 2.0, th.tx_high_alarm + 1.0) / 100) * txDial.circ;
+			var isTxOff = (tx === null || tx === 0 || tx <= LASER_OFF_DBM || (ddm && ddm.tx_status === 'off'));
+			var txDash = isTxOff ? 0 : ((arcPct(tx, th.tx_low_alarm - 2.0, th.tx_high_alarm + 1.0) / 100) * txDial.circ);
 
 			if (txTxt) {
 				txTxt.innerHTML = '';
-				if (tx === null) {
-					txTxt.appendChild(E('span', { class: 'hw-dial-single', style: 'color: ' + txQ.color + ';' }, '--'));
-				} else if (tx <= LASER_OFF_DBM) {
+				if (isTxOff) {
 					txTxt.appendChild(E('span', { class: 'hw-dial-single', style: 'color: ' + txQ.color + '; font-size: 1.05em;' }, _('Laser Off')));
 				} else if (self.unitSystem === 'dual') {
 					var uwTx = toMicrowatts(tx);
@@ -1557,7 +1555,7 @@ return view.extend({
 				]));
 				txStats.appendChild(E('div', { class: 'hw-stat-row' }, [
 					E('span', { class: 'hw-stat-label' }, _('Calculated Power:')),
-					E('span', { class: 'hw-stat-value', style: 'color: ' + txQ.color + ';' }, (tx !== null && tx <= LASER_OFF_DBM) ? _('Laser Inactive') : fmtPower(tx))
+					E('span', { class: 'hw-stat-value', style: 'color: ' + txQ.color + ';' }, isTxOff ? _('Off / 0.00 µW') : fmtPower(tx))
 				]));
 				txStats.appendChild(E('div', { class: 'hw-stat-row' }, [
 					E('span', { class: 'hw-stat-label' }, _('Nominal Range:')),
@@ -1805,7 +1803,7 @@ return view.extend({
 				_('transceiver diagnostics per') + ' ' + th.sff_citation);
 
 			setTableVal('th-rx-val', fmtPower(rx), rxQ.color);
-			setTableVal('th-tx-val', (tx !== null && tx <= LASER_OFF_DBM) ? _('Laser Inactive') : fmtPower(tx), txQ.color);
+			setTableVal('th-tx-val', isTxOff ? _('Laser Off') : fmtPower(tx), txQ.color);
 			setTableVal('th-temp-val', fmtTemp(temp), tempQ.color);
 			setTableVal('th-volt-val', fmtVolt(volt), voltQ.color);
 			setTableVal('th-bias-val', fmtBias(bias), biasQ.color);
