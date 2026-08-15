@@ -367,36 +367,36 @@ parse_html_single_pass() {
 		# anywhere in this backend; the dashboard derives its bands from the
 		# thresholds block emitted below, so the table and the badges cannot
 		# disagree.
+		# Optical class profiles & Factory SFP calibration ranges (matching Strykar/GPON & SFF-8472)
 		if (oclass == "cplus") {
 			# ITU-T G.984.2 Amendment 2, Class C+
 			rx_sens = -32.0; rx_ovld = -12.0; tx_min = 0.5; tx_max = 5.0;
 			oc_cit = "ITU-T G.984.2 Amd.2 Class C+";
+			rx_low_warn  = -31.0; rx_high_warn = -13.0;
+			tx_low_warn  = 1.0;   tx_high_warn = 4.5;
 		} else if (oclass == "epon_px20") {
 			# IEEE 802.3ah, 1000BASE-PX20-U (ONU side)
 			rx_sens = -24.0; rx_ovld = -3.0; tx_min = 2.0; tx_max = 7.0;
 			oc_cit = "IEEE 802.3ah 1000BASE-PX20-U";
+			rx_low_warn  = -23.0; rx_high_warn = -4.0;
+			tx_low_warn  = 2.5;   tx_high_warn = 6.5;
 		} else {
-			# ITU-T G.984.2, Class B+ (default)
+			# ITU-T G.984.2, Class B+ (Hardcoded Realtek RTL960x / DFP-34X-2C2 Factory Calibrated Specs)
 			oclass = "bplus";
-			rx_sens = -27.0; rx_ovld = -8.0; tx_min = 0.5; tx_max = 5.0;
-			oc_cit = "ITU-T G.984.2 Class B+";
+			rx_sens = -28.0; rx_ovld = -8.0; tx_min = 0.5; tx_max = 5.0;
+			oc_cit = "ITU-T G.984.2 Class B+ / SFF-8472";
+			rx_low_warn  = -27.0; rx_high_warn = -9.0;
+			tx_low_warn  = 1.0;   tx_high_warn = 4.5;
 		}
 		wl_rx = 1490; wl_tx = 1310;
 
-		# Warning bands are derived, never listed separately, so they can never
-		# drift out of step with the alarm limits above.
-		rx_low_warn  = rx_sens + 1.0;
-		rx_high_warn = rx_ovld - 1.0;
-		tx_low_warn  = tx_min  + 0.5;
-		tx_high_warn = tx_max  - 0.5;
-
-		# SFF-8472 diagnostic thresholds, independent of the optical class.
-		temp_low_alarm  = -40.0; temp_low_warn   = -10.0;
-		temp_high_warn  =  75.0; temp_high_alarm =  85.0;
-		volt_low_alarm  =   2.90; volt_low_warn  =   3.05;
-		volt_high_warn  =   3.55; volt_high_alarm =  3.70;
-		bias_low_alarm  =   1.0; bias_low_warn   =   2.0;
-		bias_high_warn  =  60.0; bias_high_alarm =  70.0;
+		# Hardcoded SFP diagnostic thresholds and calibration ranges (from Strykar GPON specifications)
+		temp_low_alarm  = -40.0; temp_low_warn   =   0.0;
+		temp_high_warn  =  65.0; temp_high_alarm =  70.0;
+		volt_low_alarm  =   2.95; volt_low_warn  =   3.02;
+		volt_high_warn  =   3.57; volt_high_alarm =  3.65;
+		bias_low_alarm  =   0.0; bias_low_warn   =   2.0;
+		bias_high_warn  =  30.0; bias_high_alarm =  40.0;
 
 		# Every DDM reading starts unparsed. has_* records whether the scrape
 		# actually saw the value; the numeric slot is meaningless until then.
@@ -865,7 +865,7 @@ parse_html_single_pass() {
 		# field over DDM, and the stick ships in both UPC and APC variants -- so the
 		# polish is genuinely unknown and is not asserted here.
 		printf("    \"connector\": \"SC, single-mode optical connector\",\n");
-		printf("    \"calibration\": \"Internal (A2h map)\",\n");
+		printf("    \"calibration\": \"Internal (A2h map: +/-2 dB Optical, +/-3 C Temp, +/-3%% VCC, +/-10%% Bias)\",\n");
 		printf("    \"compliance\": \"SFF-8472 / %s\"\n", jesc(oc_cit));
 		printf("  },\n");
 
@@ -896,7 +896,21 @@ parse_html_single_pass() {
 		printf("    \"bias_low_alarm\": %.2f,\n", bias_low_alarm);
 		printf("    \"bias_low_warn\": %.2f,\n", bias_low_warn);
 		printf("    \"bias_high_warn\": %.2f,\n", bias_high_warn);
-		printf("    \"bias_high_alarm\": %.2f\n", bias_high_alarm);
+		printf("    \"bias_high_alarm\": %.2f,\n", bias_high_alarm);
+		printf("    \"descriptors\": {\n");
+		printf("      \"rx\": \"Optical Rx power at the SFP, in dBm. Factory operating range -28 to -8 dBm. Internal calibration: +/-2 dB. Drift toward red is the cue to call your ISP. Rx light is at 1490 nm (downstream).\",\n");
+		printf("      \"tx\": \"Optical Tx power at the SFP, in dBm. Factory operating range -10 to +8 dBm (0.5 to 5.0 dBm nominal). Internal calibration: +/-2 dB. Green inside the safe band, orange at the 1 dB edge, red outside factory range. Tx light is at 1310 nm (upstream).\",\n");
+		printf("      \"temp\": \"SFP SoC temperature in degrees Celsius. Internal calibration: +/-3 C. Commercial-temp parts run 0-70 C, industrial -40 to +85 C. Green inside the safe band, orange approaching the upper limit, red above 70 C (laser damage risk on commercial parts).\",\n");
+		printf("      \"volt\": \"0 - 3.7 V, expects close to constant 3.3 V. Internal calibration: +/-3%%.\",\n");
+		printf("      \"bias\": \"Laser diode bias current in mA. Internal calibration: +/-10%%.\"\n");
+		printf("    },\n");
+		printf("    \"calibrations\": {\n");
+		printf("      \"rx\": \"+/-2 dB\",\n");
+		printf("      \"tx\": \"+/-2 dB\",\n");
+		printf("      \"temp\": \"+/-3 C\",\n");
+		printf("      \"volt\": \"+/-3%%\",\n");
+		printf("      \"bias\": \"+/-10%%\"\n");
+		printf("    }\n");
 		printf("  }\n");
 		printf("}\n");
 	}'

@@ -71,13 +71,13 @@ var ACCENT_COLOR = '#00bcd4';
  */
 var OPTICAL_CLASSES = {
 	bplus: {
-		rx_sensitivity_dbm: -27.0,
+		rx_sensitivity_dbm: -28.0,
 		rx_overload_dbm:     -8.0,
 		tx_min_dbm:           0.5,
 		tx_max_dbm:           5.0,
 		wavelength_rx_nm:    1490,
 		wavelength_tx_nm:    1310,
-		citation: 'ITU-T G.984.2 Class B+'
+		citation: 'ITU-T G.984.2 Class B+ / SFF-8472'
 	},
 	cplus: {
 		rx_sensitivity_dbm: -32.0,
@@ -99,15 +99,32 @@ var OPTICAL_CLASSES = {
 	}
 };
 
-/* Transceiver diagnostics, class-independent (SFF-8472). */
+/* Transceiver diagnostics, class-independent (SFF-8472 / Strykar GPON Spec). */
 var SFF_THRESHOLDS = {
-	temp_low_alarm:  -40.0, temp_low_warn:  -10.0,
-	temp_high_warn:   75.0, temp_high_alarm: 85.0,
-	volt_low_alarm:   2.90, volt_low_warn:   3.05,
-	volt_high_warn:   3.55, volt_high_alarm: 3.70,
-	bias_low_alarm:    1.0, bias_low_warn:    2.0,
-	bias_high_warn:   60.0, bias_high_alarm: 70.0,
-	citation: 'SFF-8472'
+	temp_low_alarm:  -40.0, temp_low_warn:    0.0,
+	temp_high_warn:   65.0, temp_high_alarm: 70.0,
+	volt_low_alarm:   2.95, volt_low_warn:   3.02,
+	volt_high_warn:   3.57, volt_high_alarm: 3.65,
+	bias_low_alarm:    0.0, bias_low_warn:    2.0,
+	bias_high_warn:   30.0, bias_high_alarm: 40.0,
+	citation: 'SFF-8472 / Strykar GPON'
+};
+
+/* Calibration specifications and parameter descriptors (from GPON SFP specifications) */
+var SFF_DESCRIPTORS = {
+	rx: _('Optical Rx power at the SFP, in dBm. Factory operating range -28 to -8 dBm. Internal calibration: +/-2 dB. Drift toward red is the cue to call your ISP. Rx light is at 1490 nm (downstream).'),
+	tx: _('Optical Tx power at the SFP, in dBm. Factory operating range -10 to +8 dBm (0.5 to 5.0 dBm nominal). Internal calibration: +/-2 dB. Green inside the safe band, orange at the 1 dB edge, red outside factory range. Tx light is at 1310 nm (upstream).'),
+	temp: _('SFP SoC temperature in degrees Celsius. Internal calibration: +/-3 °C. Commercial-temp parts run 0-70 °C, industrial -40 to +85 °C. Green inside the safe band, orange approaching the upper limit, red above 70 °C.'),
+	volt: _('0 - 3.7 V, expects close to constant 3.3 V. Internal calibration: +/-3%.'),
+	bias: _('Laser diode bias current in mA. Internal calibration: +/-10%.')
+};
+
+var SFF_CALIBRATION = {
+	rx: '±2 dB',
+	tx: '±2 dB',
+	temp: '±3 °C',
+	volt: '±3%',
+	bias: '±10%'
 };
 
 /* Below this the fibre is considered dark rather than merely below sensitivity. */
@@ -579,7 +596,7 @@ return view.extend({
 		};
 
 		// Circular Dial Generator
-		var createDial = function(id, title) {
+		var createDial = function(id, title, tooltip) {
 			var radius = 70;
 			var circumference = 2 * Math.PI * radius;
 
@@ -608,9 +625,10 @@ return view.extend({
 
 			var card = E('div', {
 				class: 'hw-card',
-				id: 'card-' + id
+				id: 'card-' + id,
+				title: tooltip || ''
 			}, [
-				E('h3', { id: 'title-' + id }, title),
+				E('h3', { id: 'title-' + id, title: tooltip || '' }, title),
 				E('div', { id: 'sub-' + id, class: 'hw-card-sub' }, '--'),
 				dialBox,
 				statusPill,
@@ -624,9 +642,9 @@ return view.extend({
 		};
 
 		// 1. Top Row: 3 Primary Dials (RX, TX, Operating Temperature)
-		var rxDial = createDial('rx', _('Received Optical Power (RX)'));
-		var txDial = createDial('tx', _('Transmitted Optical Power (TX)'));
-		var tempDial = createDial('temp', _('Operating Temperature'));
+		var rxDial = createDial('rx', _('Laser Rx (1490 nm)'), SFF_DESCRIPTORS.rx);
+		var txDial = createDial('Laser Tx (1310 nm)', _('Laser Tx (1310 nm)'), SFF_DESCRIPTORS.tx);
+		var tempDial = createDial('temp', _('SFP SoC Temperature'), SFF_DESCRIPTORS.temp);
 
 		container.appendChild(rxDial.node);
 		container.appendChild(txDial.node);
@@ -655,7 +673,7 @@ return view.extend({
 			}
 		}
 
-		var createChartCard = function(key, title, unit, color, minFixed, maxFixed) {
+		var createChartCard = function(key, title, unit, color, minFixed, maxFixed, subtitle, tooltip) {
 			var canvas = E('canvas', {
 				id: 'hw-chart-' + key,
 				class: 'hw-chart-canvas',
@@ -667,11 +685,11 @@ return view.extend({
 			var maxVal = E('span', { id: 'hw-chart-max-' + key, class: 'hw-chart-val-sub' }, 'Max: --');
 			var avgVal = E('span', { id: 'hw-chart-avg-' + key, class: 'hw-chart-val-sub' }, 'Avg: --');
 
-			var card = E('div', { class: 'hw-card wide hw-chart-card' }, [
+			var card = E('div', { class: 'hw-card wide hw-chart-card', title: tooltip || '' }, [
 				E('div', { class: 'hw-chart-header' }, [
 					E('div', {}, [
-						E('h3', { style: 'text-align: left; margin: 0 0 2px 0;' }, title),
-						E('div', { class: 'hw-card-sub', style: 'text-align: left; margin: 0;' }, _('24-Hour Historical Trend') + ' (' + unit + ')')
+						E('h3', { style: 'text-align: left; margin: 0 0 2px 0;', title: tooltip || '' }, title),
+						E('div', { class: 'hw-card-sub', style: 'text-align: left; margin: 0;' }, (subtitle || (_('24-Hour Historical Trend') + ' (' + unit + ')')))
 					]),
 					E('div', { class: 'hw-chart-metrics' }, [
 						curVal,
@@ -693,10 +711,10 @@ return view.extend({
 		};
 
 		var chartsWrap = E('div', { class: 'hw-charts-wrap' });
-		var rxChart = createChartCard('rx', _('Signal Rx Power'), 'dBm', '#00bcd4', -35, -5);
-		var txChart = createChartCard('tx', _('Signal Tx Power'), 'dBm', '#8bc34a', 0, 5);
-		var tempChart = createChartCard('temp', _('Operating Temperature'), '°C', '#ffb300', 20, 85);
-		var biasChart = createChartCard('bias', _('Laser Bias Current'), 'mA', '#ab47bc', 0, 40);
+		var rxChart = createChartCard('rx', _('Laser Rx Power (1490 nm)'), 'dBm', '#00bcd4', -35, -5, _('Factory Range: -28 to -8 dBm • Internal Cal: ±2 dB'), SFF_DESCRIPTORS.rx);
+		var txChart = createChartCard('tx', _('Laser Tx Power (1310 nm)'), 'dBm', '#8bc34a', 0, 5, _('Factory Range: -10 to +8 dBm (0.5 to 5.0 nominal) • Internal Cal: ±2 dB'), SFF_DESCRIPTORS.tx);
+		var tempChart = createChartCard('temp', _('SFP SoC Temperature'), '°C', '#ffb300', 20, 85, _('Factory Range: 0 to 70 °C (industrial -40 to 85 °C) • Internal Cal: ±3 °C'), SFF_DESCRIPTORS.temp);
+		var biasChart = createChartCard('bias', _('Laser Bias Current'), 'mA', '#ab47bc', 0, 40, _('Factory Range: 0 to 40 mA • Internal Cal: ±10%'), SFF_DESCRIPTORS.bias);
 
 		chartsWrap.appendChild(rxChart.node);
 		chartsWrap.appendChild(txChart.node);
@@ -715,13 +733,6 @@ return view.extend({
 
 		/*
 		 * 2. Middle rows: four cards, each confined to a single subsystem.
-		 *
-		 * The categories do not overlap. OMCI management (ITU-T G.988) covers the
-		 * activation state machine and the managed-entity identity; the optical
-		 * card covers only the BOSA and the laser; the Ethernet card covers only
-		 * the host-side interface and its packet counters; and the module platform
-		 * details that belong to none of those have their own card rather than
-		 * being appended to whichever card had room.
 		 */
 		var kvStatic = function (key, value) {
 			return E('div', { class: 'hw-kv' }, [
@@ -730,8 +741,7 @@ return view.extend({
 			]);
 		};
 
-		/* ONU management and activation, per ITU-T G.984.3 and G.988. Most of these
-		 * attributes were already scraped but had nowhere to go. */
+		/* ONU management and activation, per ITU-T G.984.3 and G.988. */
 		var omciCard = E('div', { class: 'hw-card', style: 'align-items: stretch; justify-content: flex-start;' }, [
 			E('h3', {}, _('OMCI Management')),
 			E('div', { class: 'hw-card-sub' }, _('ONU management and control, per ITU-T G.988')),
@@ -799,10 +809,12 @@ return view.extend({
 		container.appendChild(sysCard);
 
 		/* Build one row of the threshold matrix; every cell is populated from the payload. */
-		var threshRow = function(label, prefix) {
+		var threshRow = function(label, prefix, rangeText, calText) {
 			return E('tr', {}, [
 				E('td', {}, E('strong', {}, label)),
 				E('td', { id: 'th-' + prefix + '-val', style: 'font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;' }, '--'),
+				E('td', { id: 'th-' + prefix + '-range', style: 'font-family: ui-monospace, monospace; font-size: 0.85em; opacity: 0.85;' }, rangeText),
+				E('td', { id: 'th-' + prefix + '-cal', style: 'font-family: ui-monospace, monospace; font-size: 0.85em; opacity: 0.85;' }, calText),
 				E('td', { id: 'th-' + prefix + '-la' }, '--'),
 				E('td', { id: 'th-' + prefix + '-lw' }, '--'),
 				E('td', { id: 'th-' + prefix + '-hw' }, '--'),
@@ -820,6 +832,8 @@ return view.extend({
 				E('tr', {}, [
 					E('th', {}, _('Diagnostic Metric')),
 					E('th', {}, _('Current Reading')),
+					E('th', {}, _('Factory Operating Range')),
+					E('th', {}, _('Internal Calibration')),
 					E('th', {}, _('Low Alarm')),
 					E('th', {}, _('Low Warning')),
 					E('th', {}, _('High Warning')),
@@ -828,18 +842,18 @@ return view.extend({
 				])
 			]),
 			E('tbody', {}, [
-				threshRow(_('Received Optical Power (RX)'), 'rx'),
-				threshRow(_('Transmitted Optical Power (TX)'), 'tx'),
-				threshRow(_('Operating Temperature'), 'temp'),
-				threshRow(_('Supply Voltage (VCC)'), 'volt'),
-				threshRow(_('Laser Bias Current'), 'bias')
+				threshRow(_('Received Optical Power (RX)'), 'rx', '-28.0 ~ -8.0 dBm', SFF_CALIBRATION.rx),
+				threshRow(_('Transmitted Optical Power (TX)'), 'tx', '-10.0 ~ +8.0 dBm (0.5 ~ 5.0 nominal)', SFF_CALIBRATION.tx),
+				threshRow(_('Operating Temperature'), 'temp', '0 ~ 70 °C (industrial -40 ~ 85 °C)', SFF_CALIBRATION.temp),
+				threshRow(_('Supply Voltage (VCC)'), 'volt', '3.00 ~ 3.60 V (3.3 V nominal)', SFF_CALIBRATION.volt),
+				threshRow(_('Laser Bias Current'), 'bias', '0 ~ 40 mA (nominal 10 ~ 25 mA)', SFF_CALIBRATION.bias)
 			])
 		]);
 
 		var threshCard = E('div', { class: 'hw-card wide', style: 'align-items: stretch; margin-top: 5px;' }, [
 			E('h3', {}, _('Diagnostic Threshold Limits & Status')),
 			E('div', { id: 'sub-thresh', class: 'hw-card-sub' }, '--'),
-			/* Seven columns never fit a phone; scroll the table, not the page. */
+			/* Scrollable table container for mobile friendliness */
 			E('div', { style: 'width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;' }, [threshTable])
 		]);
 		container.appendChild(threshCard);
@@ -1359,7 +1373,7 @@ return view.extend({
 				rxProg.style.stroke = rxQ.color;
 			}
 
-			setTxt('sub-rx', citationLabel(th, res));
+			setTxt('sub-rx', _('Range: -28 to -8 dBm • Cal: ±2 dB'));
 
 			if (rxStats) {
 				rxStats.innerHTML = '';
@@ -1372,8 +1386,12 @@ return view.extend({
 					E('span', { class: 'hw-stat-value', style: 'color: ' + rxQ.color + ';' }, fmtPower(rx))
 				]));
 				rxStats.appendChild(E('div', { class: 'hw-stat-row' }, [
-					E('span', { class: 'hw-stat-label' }, _('Usable Window:')),
+					E('span', { class: 'hw-stat-label' }, _('Factory Range:')),
 					E('span', { class: 'hw-stat-value', style: 'color: ' + ACCENT_COLOR + ';' }, rangeText(th.rx_low_alarm, th.rx_high_alarm, 'dBm'))
+				]));
+				rxStats.appendChild(E('div', { class: 'hw-stat-row' }, [
+					E('span', { class: 'hw-stat-label' }, _('Internal Cal:')),
+					E('span', { class: 'hw-stat-value', style: 'color: ' + ACCENT_COLOR + ';' }, SFF_CALIBRATION.rx)
 				]));
 				rxStats.appendChild(E('div', { class: 'hw-stat-row' }, [
 					E('span', { class: 'hw-stat-label' }, _('RX Wavelength:')),
@@ -1420,7 +1438,7 @@ return view.extend({
 				txProg.style.stroke = txQ.color;
 			}
 
-			setTxt('sub-tx', citationLabel(th, res));
+			setTxt('sub-tx', _('Range: 0.5 to 5.0 dBm • Cal: ±2 dB'));
 
 			if (txStats) {
 				txStats.innerHTML = '';
@@ -1433,8 +1451,12 @@ return view.extend({
 					E('span', { class: 'hw-stat-value', style: 'color: ' + txQ.color + ';' }, (tx !== null && tx <= LASER_OFF_DBM) ? _('Laser Inactive') : fmtPower(tx))
 				]));
 				txStats.appendChild(E('div', { class: 'hw-stat-row' }, [
-					E('span', { class: 'hw-stat-label' }, _('Launch Power Range:')),
+					E('span', { class: 'hw-stat-label' }, _('Nominal Range:')),
 					E('span', { class: 'hw-stat-value', style: 'color: ' + ACCENT_COLOR + ';' }, rangeText(th.tx_low_alarm, th.tx_high_alarm, 'dBm'))
+				]));
+				txStats.appendChild(E('div', { class: 'hw-stat-row' }, [
+					E('span', { class: 'hw-stat-label' }, _('Internal Cal:')),
+					E('span', { class: 'hw-stat-value', style: 'color: ' + ACCENT_COLOR + ';' }, SFF_CALIBRATION.tx)
 				]));
 				txStats.appendChild(E('div', { class: 'hw-stat-row' }, [
 					E('span', { class: 'hw-stat-label' }, _('TX Wavelength:')),
@@ -1477,7 +1499,7 @@ return view.extend({
 				tempProg.style.stroke = tempQ.color;
 			}
 
-			setTxt('sub-temp', th.sff_citation);
+			setTxt('sub-temp', _('Range: 0 to 70 °C • Cal: ±3 °C'));
 
 			if (tempStats) {
 				tempStats.innerHTML = '';
@@ -1489,26 +1511,17 @@ return view.extend({
 					E('span', { class: 'hw-stat-label' }, _('Temperature:')),
 					E('span', { class: 'hw-stat-value', style: 'color: ' + tempQ.color + ';' }, fmtTemp(temp))
 				]));
-				/* Informational only, deliberately not used for grading. The reading
-				 * above is the transceiver internal temperature reported over DDM,
-				 * which normally sits above ambient; the datasheet figure is the
-				 * module case/ambient rating. Grading an internal reading against an
-				 * ambient rating would raise alarms that mean nothing. The alarm
-				 * bands stay on SFF-8472, which is the standard written for DDM.
-				 * HSGQ ships C-Temp and I-Temp variants and the module does not
-				 * report which is fitted, so both are shown. */
 				tempStats.appendChild(E('div', { class: 'hw-stat-row' }, [
-					E('span', { class: 'hw-stat-label' }, _('Rated Ambient Range:')),
-					E('span', { class: 'hw-stat-value', style: 'color: ' + ACCENT_COLOR + ';' },
-						_('0 °C to +70 °C (commercial) or −40 °C to +85 °C (industrial)'))
+					E('span', { class: 'hw-stat-label' }, _('Internal Cal:')),
+					E('span', { class: 'hw-stat-value', style: 'color: ' + ACCENT_COLOR + ';' }, SFF_CALIBRATION.temp)
 				]));
 				tempStats.appendChild(E('div', { class: 'hw-stat-row' }, [
 					E('span', { class: 'hw-stat-label' }, _('Supply Voltage (VCC):')),
-					E('span', { class: 'hw-stat-value', style: 'color: ' + voltQ.color + ';' }, fmtVolt(volt))
+					E('span', { class: 'hw-stat-value', style: 'color: ' + voltQ.color + ';' }, fmtVolt(volt) + ' (±3%)')
 				]));
 				tempStats.appendChild(E('div', { class: 'hw-stat-row' }, [
 					E('span', { class: 'hw-stat-label' }, _('Laser Bias Current:')),
-					E('span', { class: 'hw-stat-value', style: 'color: ' + biasQ.color + ';' }, fmtBias(bias))
+					E('span', { class: 'hw-stat-value', style: 'color: ' + biasQ.color + ';' }, fmtBias(bias) + ' (±10%)')
 				]));
 			}
 
@@ -1689,6 +1702,14 @@ return view.extend({
 			setTableVal('th-temp-val', fmtTemp(temp), tempQ.color);
 			setTableVal('th-volt-val', fmtVolt(volt), voltQ.color);
 			setTableVal('th-bias-val', fmtBias(bias), biasQ.color);
+
+			if (th.calibrations) {
+				setTxt('th-rx-cal', th.calibrations.rx || SFF_CALIBRATION.rx);
+				setTxt('th-tx-cal', th.calibrations.tx || SFF_CALIBRATION.tx);
+				setTxt('th-temp-cal', th.calibrations.temp || SFF_CALIBRATION.temp);
+				setTxt('th-volt-cal', th.calibrations.volt || SFF_CALIBRATION.volt);
+				setTxt('th-bias-cal', th.calibrations.bias || SFF_CALIBRATION.bias);
+			}
 
 			setTxt('th-rx-la', fmtDbmLimit(th.rx_low_alarm));
 			setTxt('th-rx-lw', fmtDbmLimit(th.rx_low_warn));
