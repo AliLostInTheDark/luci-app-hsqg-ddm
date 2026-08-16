@@ -189,11 +189,11 @@ return view.extend({
 			' .hw-actionbar-title { font-size: 0.95em; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; opacity: 0.85; }' +
 			' .hw-actionbar-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }' +
 			' .hw-actionbar-note { font-size: 0.72em; opacity: 0.65; width: 100%; margin: 0; }' +
-			' .hw-omci-wrap { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: stretch; gap: 20px; }' +
-			' .hw-omci-inst { width: 100%; margin: 0 0 12px 0; padding: 10px 12px; border: 1px solid var(--border-color, rgba(128,128,128,0.15)); border-radius: 8px; }' +
+			' .hw-omci-wrap { flex: 1 1 100%; min-width: 0; max-width: 100%; display: flex; flex-wrap: wrap; align-items: stretch; gap: 20px; }' +
+			' .hw-omci-inst { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; margin: 0 0 12px 0; padding: 10px 12px; border: 1px solid var(--border-color, rgba(128,128,128,0.15)); border-radius: 8px; }' +
 			' .hw-omci-inst:last-child { margin-bottom: 0; }' +
 			' .hw-omci-eid { font-size: 0.75em; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.8; margin: 0 0 8px 0; }' +
-			' .hw-omci-tbl { width: 100%; border-collapse: collapse; font-size: 0.76em; }' +
+			' .hw-omci-tbl { width: 100%; min-width: 0; border-collapse: collapse; font-size: 0.76em; }' +
 			' .hw-omci-tbl th, .hw-omci-tbl td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border-color, rgba(128,128,128,0.12)); white-space: nowrap; }' +
 			' .hw-omci-tbl th { font-weight: 700; opacity: 0.7; }' +
 			' .hw-omci-tbl td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }' +
@@ -242,6 +242,8 @@ return view.extend({
 			'     white-space: nowrap !important; text-overflow: clip !important;' +
 			'     max-width: none !important; min-width: max-content !important; box-sizing: border-box !important; }' +
 			'   .cbi-page-actions, .right { display: flex !important; flex-wrap: wrap !important; gap: 6px !important; }' +
+			'   .hw-card.half { flex-basis: 100%; }' +
+			'   .hw-omci-wrap { gap: 15px; }' +
 			'   .hw-chart-header { flex-direction: column; align-items: flex-start; gap: 6px; }' +
 			'   .hw-chart-metrics { align-items: flex-start; }' +
 			'   .hw-chart-val { font-size: 1.20em; }' +
@@ -250,6 +252,10 @@ return view.extend({
 			' @media (max-width: 480px) {' +
 			'   .hw-card { padding: 15px; }' +
 			'   .hw-card.half { flex-basis: 100%; }' +
+			'   .hw-omci-wrap { gap: 15px; }' +
+			'   .hw-omci-inst { padding: 8px 10px; }' +
+			'   .hw-omci-tbl { font-size: 0.70em; }' +
+			'   .hw-omci-tbl th, .hw-omci-tbl td { padding: 3px 6px; }' +
 			'   .hw-dial { transform: scale(0.9); }' +
 			'   .hw-dial-line { font-size: 1.05em; }' +
 			'   .hw-dial-single { font-size: 1.05em; }' +
@@ -973,8 +979,14 @@ return view.extend({
 				var body;
 
 				if (!data || !data.instances || !data.instances.length) {
-					body = [E('div', { class: 'hw-omci-empty' },
-						placeholder ? _('Not read yet') : _('No instances reported'))];
+					var emptyText;
+					if (payload && payload.configured === false)
+						emptyText = _('Not configured');
+					else if (placeholder)
+						emptyText = _('Not read yet');
+					else
+						emptyText = _('No instances reported');
+					body = [E('div', { class: 'hw-omci-empty' }, emptyText)];
 				} else {
 					body = data.instances.map(function(inst) {
 						var eid = inst.EntityID || inst.EntityId || '--';
@@ -1425,6 +1437,14 @@ return view.extend({
 				banner.style.display = 'none';
 				banner.textContent = '';
 				container.classList.remove('hw-offline');
+			} else if (res.configured === false) {
+				/* "Not configured" is not a failure. The backend reports it with
+				 * configured:false and never opens a connection, so the page says
+				 * so plainly and leaves every card empty rather than accusing the
+				 * module of being unreachable when nothing was ever asked of it. */
+				banner.textContent = _('Not configured. Set the module address, username and password under Settings — no connection is attempted until then.');
+				banner.style.display = 'flex';
+				container.classList.add('hw-offline');
 			} else {
 				banner.textContent = _('Telemetry unavailable:') + ' ' +
 					(res.error || res.message || _('the module returned no diagnostic data.'));

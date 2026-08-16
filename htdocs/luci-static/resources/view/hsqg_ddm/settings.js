@@ -28,7 +28,6 @@ return view.extend({
 		o = s.option(form.Value, 'host', _('Module IP Address'),
 			_('The IP address of the HSGQ SFP module inside the media converter.'));
 		o.datatype = 'ip4addr';
-		o.default = '192.168.150.1';
 		o.rmempty = false;
 
 		/* Only the schemes the backend actually implements are offered. It scrapes
@@ -50,13 +49,11 @@ return view.extend({
 
 		o = s.option(form.Value, 'username', _('Username'),
 			_('Login username for the module.'));
-		o.default = 'admin';
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'password', _('Password'),
 			_('Login password for the module.'));
 		o.password = true;
-		o.default = 'Admin@1234567890';
 		o.rmempty = false;
 
 		o = s.option(form.ListValue, 'unit_system', _('Measurement Unit System'),

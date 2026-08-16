@@ -159,15 +159,19 @@ url_encode_form() {
 		-e 's/ /%20/g'
 }
 
+# The address and credentials have no defaults on purpose. They identify and
+# authenticate against one specific SFP module, so a built-in value is either
+# wrong for the user's hardware or - worse - a real credential shipped to every
+# router. Only settings that are safe to assume carry defaults here.
 get_config() {
 	# Defaults must match root/etc/config/hsqg_ddm so that an absent option
 	# behaves exactly as a freshly installed one.
 	ENABLED="1"
-	HOST="192.168.150.1"
+	HOST=""
 	PROTO="http"
 	PORT="80"
-	USER="admin"
-	PASS="Admin@1234567890"
+	USER=""
+	PASS=""
 	TIMEOUT="3"
 	OPTICAL_CLASS="bplus"
 
@@ -201,6 +205,25 @@ get_config() {
 		bplus|cplus|epon_px20) ;;
 		*) OPTICAL_CLASS="bplus" ;;
 	esac
+}
+
+# True once the user has supplied everything needed to reach their module.
+#
+# All three are required. With no address there is nothing to connect to; with
+# no credentials the login POST cannot succeed and every page fetch would come
+# back unauthenticated. Probing a guessed address is worse than doing nothing:
+# on someone else's network that address belongs to another device.
+is_configured() {
+	[ -n "$HOST" ] && [ -n "$USER" ] && [ -n "$PASS" ]
+}
+
+# Envelope for "the user has not pointed this at a module yet".
+#
+# Distinct from a failure: `configured` is false rather than `success` merely
+# being false, so the dashboard can render empty cards instead of an error
+# banner. Nothing has gone wrong - there is simply nothing to read.
+unconfigured_json() {
+	printf '{"success": false, "configured": false, "connected": false, "host": "", "error": "Not configured. Set the module address, username and password under Settings."}\n'
 }
 
 # Compose the management base URL from proto/host/port, omitting the port when
@@ -1027,7 +1050,7 @@ fetch_omci() {
 
 case "$1" in
 	list)
-		echo '{ "get_status": {}, "get_history": {}, "get_omci": {}, "restart_stick": {}, "test_connection": { "host": "192.168.150.1", "username": "admin", "password": "string" } }'
+		echo '{ "get_status": {}, "get_history": {}, "get_omci": {}, "restart_stick": {}, "test_connection": { "host": "string", "username": "string", "password": "string" } }'
 		;;
 	daemon)
 		run_daemon
@@ -1039,6 +1062,8 @@ case "$1" in
 				;;
 			get_status)
 				get_config
+
+				is_configured || { unconfigured_json; exit 0; }
 
 				if [ "$ENABLED" != "1" ]; then
 					fail_json "$HOST" "Module is disabled in configuration"
@@ -1096,6 +1121,8 @@ case "$1" in
 				;;
 			get_omci)
 				get_config
+
+				is_configured || { unconfigured_json; exit 0; }
 				if [ "$ENABLED" != "1" ]; then
 					fail_json "$HOST" "Module is disabled in configuration"
 					exit 0
@@ -1109,6 +1136,8 @@ case "$1" in
 				;;
 			restart_stick)
 				get_config
+
+				is_configured || { unconfigured_json; exit 0; }
 				if [ "$ENABLED" != "1" ]; then
 					fail_json "$HOST" "Module is disabled in configuration"
 					exit 0
@@ -1138,6 +1167,10 @@ case "$1" in
 				[ -n "$THOST" ] && HOST="$THOST"
 				[ -n "$TUSER" ] && USER="$TUSER"
 				[ -n "$TPASS" ] && PASS="$TPASS"
+
+				# Gated on the merged values, not on stored config: the user may
+				# be testing details they have typed but not saved.
+				is_configured || { unconfigured_json; exit 0; }
 
 				if ! require_curl; then
 					fail_json "$HOST" "$CURL_MISSING_MSG"
