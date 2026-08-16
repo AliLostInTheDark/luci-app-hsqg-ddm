@@ -50,16 +50,44 @@ var OMCI_CARDS = [
 	{ id: '329', title: _('VEIP'), sub: _('ME 329 — virtual Ethernet interface point') }
 ];
 
-/*
- * Severity palette (shared with luci-app-vsol-ddm — keep the two identical).
- * Every quality evaluator returns { color, bg, label, badge, severity }; all five
- * keys are mandatory on every return path, which is why they are built by grade().
- */
+var isDarkThemeGlobal = function() {
+	try {
+		var bodyBg = window.getComputedStyle(document.body).backgroundColor;
+		var m = bodyBg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+		if (m) {
+			var lum = (0.299 * parseInt(m[1], 10) + 0.587 * parseInt(m[2], 10) + 0.114 * parseInt(m[3], 10));
+			return (lum < 130);
+		}
+		return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+	} catch(e) {
+		return true;
+	}
+};
+
+var getSeverityPalette = function() {
+	var isDark = isDarkThemeGlobal();
+	if (isDark) {
+		return {
+			alarm:   { color: '#ff5252', bg: 'rgba(255,82,82,0.24)' },
+			warn:    { color: '#ffb300', bg: 'rgba(255,179,0,0.24)' },
+			optimal: { color: '#66bb6a', bg: 'rgba(102,187,106,0.24)' },
+			off:     { color: '#9e9e9e', bg: 'rgba(158,158,158,0.22)' }
+		};
+	} else {
+		return {
+			alarm:   { color: '#c62828', bg: 'rgba(198,40,40,0.22)' },
+			warn:    { color: '#e65100', bg: 'rgba(230,81,0,0.22)' },
+			optimal: { color: '#2e7d32', bg: 'rgba(46,125,50,0.22)' },
+			off:     { color: '#616161', bg: 'rgba(97,97,97,0.18)' }
+		};
+	}
+};
+
 var SEVERITY_PALETTE = {
-	alarm:   { color: '#ff5252', bg: 'rgba(255,82,82,0.16)' },
-	warn:    { color: '#ffb300', bg: 'rgba(255,179,0,0.16)' },
-	optimal: { color: '#8bc34a', bg: 'rgba(139,195,74,0.16)' },
-	off:     { color: '#9e9e9e', bg: 'rgba(158,158,158,0.18)' }
+	get alarm() { return getSeverityPalette().alarm; },
+	get warn() { return getSeverityPalette().warn; },
+	get optimal() { return getSeverityPalette().optimal; },
+	get off() { return getSeverityPalette().off; }
 };
 
 /* Accent for informational, non-graded values. */
@@ -1289,13 +1317,20 @@ return view.extend({
 
 			var latest = validSamples[validSamples.length - 1].val;
 			var isLatestAlarm = ((thLo != null && latest < thLo) || (thHi != null && latest > thHi));
-			var isLatestWarn = (!isLatestAlarm && ((warnLo != null && latest < warnLo) || (warnHi != null && latest > warnHi)));
-			var headerColor = isLatestAlarm ? '#ff5252' : (isLatestWarn ? '#ffb300' : chartObj.color);
+			var activeLineColor = isDark ? chartObj.color : (
+				chartObj.key === 'rx' ? '#00838f' :
+				chartObj.key === 'tx' ? '#2e7d32' :
+				chartObj.key === 'temp' ? '#d84315' :
+				chartObj.key === 'bias' ? '#6a1b9a' : chartObj.color
+			);
+
+			var headerColor = isLatestAlarm ? (isDark ? '#ff5252' : '#c62828') :
+			                  (isLatestWarn ? (isDark ? '#ffb300' : '#e65100') : activeLineColor);
 
 			if (curEl) {
 				if (chartObj.key === 'tx' && (latest === 0 || latest <= LASER_OFF_DBM)) {
 					curEl.textContent = _('Laser Off');
-					curEl.style.color = '#757575';
+					curEl.style.color = isDark ? '#9e9e9e' : '#616161';
 				} else {
 					curEl.textContent = latest.toFixed(2) + ' ' + chartObj.unit;
 					curEl.style.color = headerColor;
@@ -1323,7 +1358,7 @@ return view.extend({
 				if (borderColor) {
 					ctx.save();
 					ctx.strokeStyle = borderColor;
-					ctx.lineWidth = 1;
+					ctx.lineWidth = 1.2;
 					ctx.setLineDash([3, 3]);
 					if (bHi != null && isFinite(bHi) && bHi >= yMin && bHi <= yMax) {
 						ctx.beginPath();
@@ -1341,17 +1376,18 @@ return view.extend({
 				}
 			};
 
-			var RED_BG   = isDark ? 'rgba(255, 82, 82, 0.10)' : 'rgba(255, 82, 82, 0.12)';
-			var RED_LINE = isDark ? 'rgba(255, 82, 82, 0.40)' : 'rgba(255, 82, 82, 0.55)';
-			var YEL_BG   = isDark ? 'rgba(255, 179, 0, 0.08)' : 'rgba(255, 179, 0, 0.11)';
-			var YEL_LINE = isDark ? 'rgba(255, 179, 0, 0.35)' : 'rgba(255, 179, 0, 0.50)';
-			var GRN_BG   = isDark ? 'rgba(76, 175, 80, 0.06)' : 'rgba(76, 175, 80, 0.09)';
+			var RED_BG   = isDark ? 'rgba(239, 83, 80, 0.22)' : 'rgba(211, 47, 47, 0.22)';
+			var RED_LINE = isDark ? 'rgba(255, 82, 82, 0.75)' : 'rgba(198, 40, 40, 0.85)';
+			var YEL_BG   = isDark ? 'rgba(255, 193, 7, 0.22)' : 'rgba(245, 124, 0, 0.22)';
+			var YEL_LINE = isDark ? 'rgba(255, 193, 7, 0.75)' : 'rgba(230, 81, 0, 0.85)';
+			var GRN_BG   = isDark ? 'rgba(76, 175, 80, 0.20)' : 'rgba(46, 125, 50, 0.20)';
+			var GRN_LINE = isDark ? 'rgba(76, 175, 80, 0.65)' : 'rgba(46, 125, 50, 0.80)';
 
 			// 1. Green Optimal / Normal operating range
 			var optLo = (warnLo != null && isFinite(warnLo)) ? warnLo : thLo;
 			var optHi = (warnHi != null && isFinite(warnHi)) ? warnHi : thHi;
 			if (optLo != null || optHi != null) {
-				drawBand(optLo, optHi, GRN_BG, null);
+				drawBand(optLo, optHi, GRN_BG, GRN_LINE);
 			}
 
 			// 2. Yellow Warning margin bands
@@ -1371,9 +1407,9 @@ return view.extend({
 			}
 
 			// Draw Horizontal Grid lines & Y labels
-			ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(0, 0, 0, 0.07)';
+			ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.12)';
 			ctx.lineWidth = 1;
-			ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.65)' : 'rgba(0, 0, 0, 0.65)';
+			ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 0, 0, 0.80)';
 			ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 			ctx.textAlign = 'right';
 
@@ -1408,7 +1444,7 @@ return view.extend({
 			ctx.lineWidth = 1;
 			for (var vl = 0; vl <= numVerticalLines; vl++) {
 				var vx = padL + (plotW * vl / numVerticalLines);
-				ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.06)';
+				ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.10)' : 'rgba(0, 0, 0, 0.10)';
 				ctx.beginPath();
 				ctx.moveTo(vx, padT);
 				ctx.lineTo(vx, padT + plotH);
@@ -1416,7 +1452,7 @@ return view.extend({
 			}
 
 			// Draw X-axis Timestamps with zero truncation
-			ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.65)' : 'rgba(0, 0, 0, 0.65)';
+			ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 0, 0, 0.80)';
 			for (var ls = 0; ls <= numVerticalLines; ls += labelStep) {
 				var lx = padL + (plotW * ls / numVerticalLines);
 				var curT = minTime + (WINDOW_MS * ls / numVerticalLines);
@@ -1451,8 +1487,8 @@ return view.extend({
 			var validPoints = points.filter(function(pt) { return !pt.offline; });
 			if (validPoints.length >= 2 && (validPoints[validPoints.length - 1].x - validPoints[0].x) > 4) {
 				var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
-				grad.addColorStop(0, chartObj.color + '22');
-				grad.addColorStop(1, chartObj.color + '00');
+				grad.addColorStop(0, activeLineColor + (isDark ? '38' : '44'));
+				grad.addColorStop(1, activeLineColor + '00');
 
 				ctx.beginPath();
 				ctx.moveTo(validPoints[0].x, padT + plotH);
@@ -1465,7 +1501,7 @@ return view.extend({
 				ctx.fill();
 			}
 
-			// 2. Draw sleek continuous lines matching Grafana (1.8px width)
+			// 2. Draw sleek continuous lines matching Grafana (2.0px width)
 			ctx.lineJoin = 'round';
 			ctx.lineCap = 'round';
 			for (var s = 0; s < points.length - 1; s++) {
@@ -1479,18 +1515,18 @@ return view.extend({
 				if (pA.offline || pB.offline) {
 					// Offline / unreachable state: grey dashed line
 					ctx.setLineDash([3, 3]);
-					ctx.strokeStyle = '#757575';
-					ctx.lineWidth = 1.5;
+					ctx.strokeStyle = isDark ? '#757575' : '#9e9e9e';
+					ctx.lineWidth = 1.8;
 				} else if (pA.alarm || pB.alarm) {
 					// Beyond or below limits: red solid line
 					ctx.setLineDash([]);
-					ctx.strokeStyle = '#ff5252';
-					ctx.lineWidth = 1.8;
+					ctx.strokeStyle = isDark ? '#ff5252' : '#c62828';
+					ctx.lineWidth = 2.0;
 				} else {
 					// Normal healthy operating value: standard sleek line
 					ctx.setLineDash([]);
-					ctx.strokeStyle = chartObj.color;
-					ctx.lineWidth = 1.8;
+					ctx.strokeStyle = activeLineColor;
+					ctx.lineWidth = 2.0;
 				}
 				ctx.stroke();
 			}
@@ -1525,8 +1561,8 @@ return view.extend({
 			for (var d = 0; d < renderedDots.length; d++) {
 				var rDot = renderedDots[d];
 				ctx.beginPath();
-				ctx.arc(rDot.x, rDot.y, 2.5, 0, 2 * Math.PI);
-				ctx.fillStyle = rDot.alarm ? '#ff5252' : chartObj.color;
+				ctx.arc(rDot.x, rDot.y, 2.8, 0, 2 * Math.PI);
+				ctx.fillStyle = rDot.alarm ? (isDark ? '#ff5252' : '#c62828') : activeLineColor;
 				ctx.fill();
 			}
 
@@ -1536,7 +1572,7 @@ return view.extend({
 
 				// Vertical dashed crosshair line
 				ctx.save();
-				ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.35)' : 'rgba(0, 0, 0, 0.30)';
+				ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.40)' : 'rgba(0, 0, 0, 0.40)';
 				ctx.lineWidth = 1;
 				ctx.setLineDash([3, 3]);
 				ctx.beginPath();
@@ -1548,12 +1584,12 @@ return view.extend({
 				// Halo / Highlight on the hovered dot
 				ctx.beginPath();
 				ctx.arc(hDot.x, hDot.y, 5.5, 0, 2 * Math.PI);
-				ctx.fillStyle = isDark ? '#ffffff' : '#333333';
+				ctx.fillStyle = isDark ? '#ffffff' : '#222222';
 				ctx.fill();
 
 				ctx.beginPath();
 				ctx.arc(hDot.x, hDot.y, 3.5, 0, 2 * Math.PI);
-				ctx.fillStyle = hDot.alarm ? '#ff5252' : chartObj.color;
+				ctx.fillStyle = hDot.alarm ? (isDark ? '#ff5252' : '#c62828') : activeLineColor;
 				ctx.fill();
 
 				// Tooltip formatting
@@ -1582,7 +1618,7 @@ return view.extend({
 
 				// Tooltip bubble background
 				ctx.fillStyle = isDark ? 'rgba(20, 22, 26, 0.95)' : 'rgba(255, 255, 255, 0.96)';
-				ctx.strokeStyle = hDot.alarm ? '#ff5252' : chartObj.color;
+				ctx.strokeStyle = hDot.alarm ? (isDark ? '#ff5252' : '#c62828') : activeLineColor;
 				ctx.lineWidth = 1;
 				ctx.beginPath();
 				if (ctx.roundRect) {
