@@ -99,9 +99,22 @@ jobs:
         run: |
           set -eu
           f=root/usr/libexec/rpcd/hsqg_ddm
-          begin=$(( $(grep -n "awk -v " "$f" | head -1 | cut -d: -f1) + 1 ))
-          end=$(grep -n "^[[:space:]]*}'" "$f" | head -1 | cut -d: -f1)
-          sed -n "${begin},${end}p" "$f" | sed "$ s/'$//" > /tmp/prog.awk
+
+          # Anchor on the parser's own signature, not "the first awk in the
+          # file". The 24h history collector introduced an earlier `awk -v`, and
+          # the first-match heuristic then extracted that instead - it writes to
+          # a file and emits nothing on empty input, so this job failed on an
+          # empty /tmp/o.json rather than on anything the parser had done.
+          # oclass is passed only to the HTML parser, which makes it unambiguous.
+          begin=$(grep -n 'awk -v host=.*-v oclass=' "$f" | head -1 | cut -d: -f1)
+          test -n "$begin" || { echo "could not locate the HTML parser in $f"; exit 1; }
+
+          # ...and the closing brace that follows it, rather than the first one
+          # anywhere in the file. -v q avoids embedding a quote in the program.
+          end=$(awk -v b="$begin" -v q="'" 'NR > b && $0 ~ "^[[:space:]]*}" q { print NR; exit }' "$f")
+          test -n "$end" || { echo "could not locate the end of the parser in $f"; exit 1; }
+
+          sed -n "$((begin + 1)),${end}p" "$f" | sed "$ s/'$//" > /tmp/prog.awk
           for a in "awk" "mawk" "busybox awk"; do
             echo "" | $a -v host=h -v ts=1 -v oclass=bplus -f /tmp/prog.awk > /tmp/o.json
             python3 -m json.tool /tmp/o.json > /dev/null
