@@ -18,7 +18,7 @@ LUCI_DEPENDS:=+luci-base +curl
 # and therefore must stay architecture specific.)
 LUCI_PKGARCH:=all
 
-PKG_VERSION:=1.0.2
+PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
