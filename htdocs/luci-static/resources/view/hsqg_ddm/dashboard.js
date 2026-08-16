@@ -189,6 +189,11 @@ return view.extend({
 			' .hw-actionbar-title { font-size: 0.95em; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; opacity: 0.85; }' +
 			' .hw-actionbar-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }' +
 			' .hw-actionbar-note { font-size: 0.72em; opacity: 0.65; width: 100%; margin: 0; }' +
+			/* The OMCI rule table is wider than a phone. It must scroll inside this
+			   container; without the rule the class had no effect at all and the
+			   table was simply clipped by the card's overflow:hidden, putting the
+			   last columns permanently out of reach. */
+			' .hw-table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }' +
 			' .hw-omci-wrap { flex: 1 1 100%; min-width: 0; max-width: 100%; display: flex; flex-wrap: wrap; align-items: stretch; gap: 20px; }' +
 			' .hw-omci-inst { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; margin: 0 0 12px 0; padding: 10px 12px; border: 1px solid var(--border-color, rgba(128,128,128,0.15)); border-radius: 8px; }' +
 			' .hw-omci-inst:last-child { margin-bottom: 0; }' +
