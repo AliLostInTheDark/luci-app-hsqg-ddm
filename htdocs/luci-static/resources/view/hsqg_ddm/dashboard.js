@@ -1319,6 +1319,7 @@ return view.extend({
 
 			var latest = validSamples[validSamples.length - 1].val;
 			var isLatestAlarm = ((thLo != null && latest < thLo) || (thHi != null && latest > thHi));
+			var isLatestWarn = (!isLatestAlarm && ((warnLo != null && latest < warnLo) || (warnHi != null && latest > warnHi)));
 			var activeLineColor = isDark ? chartObj.color : (
 				chartObj.key === 'rx' ? '#00838f' :
 				chartObj.key === 'tx' ? '#2e7d32' :
