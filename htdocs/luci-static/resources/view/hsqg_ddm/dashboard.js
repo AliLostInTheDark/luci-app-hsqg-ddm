@@ -90,6 +90,8 @@ var SEVERITY_PALETTE = {
 	get off() { return getSeverityPalette().off; }
 };
 
+var SEVERITY = SEVERITY_PALETTE;
+
 /* Accent for informational, non-graded values. */
 var ACCENT_COLOR = '#00bcd4';
 
